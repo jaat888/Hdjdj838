@@ -2129,6 +2129,8 @@ def context_block():
         log("mode_note galti: %s" % e)
     try:
         if STATE.get("goal"):
+            if STATE.get("brief"):
+                p.append(STATE["brief"])
             p.append("SAMAJH: " + STATE["goal"] + ("\nDONE CRITERIA (@@DONE par inka saboot do):\n" + "\n".join(STATE["criteria"]) if STATE.get("criteria") else ""))
         sk = seekha_text()
         if sk:
@@ -5207,7 +5209,22 @@ body{font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 footer textarea{background:#fff;box-shadow:0 1px 3px rgba(17,24,39,.08)}
 #send{background:#111827;width:44px;height:44px;font-size:17px;touch-action:manipulation;display:flex;align-items:center;justify-content:center}
 #send.stop{background:#dc2626;font-size:15px}
-#send.busy{opacity:.5}
+#send.busy{opacity:.6}
+#cfm{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:20;padding:24px;backdrop-filter:blur(2px)}
+#cfm .cbox{background:var(--bg);color:var(--fg);border-radius:22px;padding:22px 20px 16px;width:100%;max-width:340px;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.3)}
+#cfm .ci{width:48px;height:48px;border-radius:50%;background:#fee2e2;color:#dc2626;font-size:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 10px}
+#cfm h3{margin:0 0 6px;font-size:18px}#cfm p{margin:0 0 16px;color:var(--mut);font-size:14px;line-height:1.4}
+#cfm button{display:block;width:100%;border:0;border-radius:14px;padding:13px;font-size:15px;margin-top:8px}
+#cfm .cgo{background:var(--acc);color:#fff;font-weight:600}#cfm .cstop{background:transparent;color:#dc2626;border:1px solid var(--bd)}
+.pchk{margin:8px 0;border:1px solid var(--bd);border-radius:12px;font-size:13px;color:var(--mut);overflow:hidden}
+.pchk summary{padding:8px 12px;cursor:pointer}.pchk ul{margin:0;padding:2px 14px 10px 30px;color:var(--fg)}.pchk li{margin:3px 0}
+.fgrp{display:flex;align-items:center;gap:8px;padding:12px 4px 6px;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--mut);cursor:pointer}
+.fgrp .n{font-weight:400}.frow{display:flex;align-items:center;gap:12px;padding:8px 4px;border-radius:12px}
+.frow:active{background:var(--card)}.fic{flex:none;width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;background:#64748b}
+.fnm{flex:1;min-width:0;cursor:pointer}.fnm b{display:block;font-weight:500;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fnm small{color:var(--mut);font-size:12px}.fkb{flex:none;background:none;border:0;color:var(--mut);font-size:20px;padding:6px 10px}
+.fact{display:none;gap:8px;padding:2px 4px 10px 54px}.fact.on{display:flex}
+.fact a,.fact button{border:1px solid var(--bd);background:var(--card);color:var(--fg);border-radius:999px;padding:6px 14px;font-size:13px;text-decoration:none;cursor:pointer}
 html,body{max-width:100%;overflow-x:hidden;overscroll-behavior-x:none}
 #chat{min-width:0;width:100%;overflow-x:hidden;touch-action:pan-y;overscroll-behavior-x:none}
 #chat>*{min-width:0;max-width:min(760px,100%);box-sizing:border-box}
@@ -5244,6 +5261,8 @@ footer textarea{min-height:54px;max-height:200px;padding:15px 18px;line-height:1
 <textarea id=t rows=1 placeholder="Kaam likho..."></textarea>
 <button id=send onclick="sendBtn()">➤</button>
 <input type=file id=up multiple style="display:none" onchange="upload(this.files)"></footer>
+<div id=cfm onclick="if(event.target==this)cfmNo()"><div class=cbox><div class=ci>⏹</div><h3>Kaam rok dein?</h3><p id=cfmt></p>
+<button class=cgo type=button onclick="cfmNo()">Chalne do</button><button class=cstop type=button onclick="cfmYes()">Haan, roko</button></div></div>
 <div id=psheet><div class=top><b>🗂 Projects</b>
 <button class=ib onclick="newProject()">➕ Naya</button>
 <button class=ib onclick="closeProjects()">✕</button></div>
@@ -5305,13 +5324,13 @@ function toggleMenu(ev){ev.stopPropagation();var m=document.getElementById('menu
 function mnu(a){document.getElementById('menu').style.display='none';if(a=='conf')openConf();else if(a=='files')openFiles();else act(a)}
 document.addEventListener('click',function(){var m=document.getElementById('menu');if(m)m.style.display='none'});
 var NOISE=/(HTTP\s?\d{3}|\b429\b|rate.?limit|bheed|aaram|ruk ke dobara|org_\w+|cooldown)/i,PROV=/^(JAAT|GEM\d?|GROQ|DS|NV2|DAI)\b/;
-var act=null,actBody=null,actN=0,lastAi=null,doneShown=false;
+var act=null,actBody=null,actN=0,lastAi=null,doneShown=false,stopping=false,curLevel=0,curPlan=[0,0];
 function actBox(){if(!act){act=el('details','step act');act.appendChild(el('summary',null,'Kaam chal raha hai'));actBody=el('div','actb');act.appendChild(actBody);actN=0;chat.appendChild(act)}return actBody}
 function actSay(t){if(!act)return;actN++;act.firstChild.textContent=t+(actN>1?'  \u00b7  '+actN+' kadam':'')}
 function noisy(e){var x=e.text||'';return (e.t=='note'&&NOISE.test(x))||(e.t=='err'&&PROV.test(x)&&NOISE.test(x))}
 function cleanStep(s){var V={EDIT:'Badlo',WRITE:'Banao',WRITEB64:'Banao',VERIFY:'Jaanch',RUN:'Chalao',READ:'Padho',CHECK:'Jaanch'};
  return String(s).replace(/^@@(\w+)\s*/,function(m,c){return (V[c]||c)+': '}).replace(/\s*\u2192\s*/g,' \u2014 ')}
-function stopNow(){var b=document.getElementById('send');b.classList.add('busy');toast('Ruk raha hoon...');var n=0;
+function stopNow(){stopping=true;sendIcon();toast('Ruk raha hoon...');var n=0;
  (function go(){post('/stop').catch(function(){});if(++n<5&&running)setTimeout(go,1500)})()}
 function render(e){
  if(noisy(e))return;
@@ -5344,6 +5363,7 @@ function render(e){
   askBox={c:a,st:st};chat.appendChild(a)}
  else if(e.t=='ask_done'){if(askBox){askBox.st.textContent=(e.how=='user'?'✅ aapka jawab: ':'🗳 3 AI ne tay kiya: ')+e.text;askBox.c.style.borderColor='var(--bd)';askBox=null}}
  else if(e.t=='err')chat.appendChild(el('div','msg err',e.text));
+ else if(e.t=='note'&&/^🔎PLANCHK/.test(e.text||'')){var pl=e.text.split('\n');var dt=el('details','pchk');dt.appendChild(el('summary',null,'🔎 Plan check: '+(pl.length-2)+' baat'));var ul=el('ul');pl.slice(2).forEach(function(x){ul.appendChild(el('li',null,x))});dt.appendChild(ul);(act?actBody:chat).appendChild(dt)}
  else if(e.t=='note'){if(INNER.test(e.text||''))inner(e.text,null);else(/^(⏳|⚠|❌|Ruk)/.test(e.text||'')||!act?chat:actBody).appendChild(el('div','note',e.text))}
 }
 function fresh(){act=null;lastAi=null;doneShown=false;plan=[];chk=null;planBox=null;askBox=null;chat.innerHTML='';var h=el('div',null,'Naya chat shuru. Kaam likho.');h.id='hint';chat.appendChild(h)}
@@ -5354,10 +5374,10 @@ function poll(){if(polling)return;polling=true;
   var near=chat.scrollHeight-chat.scrollTop-chat.clientHeight<120;
   j.events.forEach(function(e){if(e.id<=last)return;last=e.id;
    if(e.t=='reset')fresh();else render(e)});
-  running=j.running;if(!running&&lastAi&&!doneShown){chat.appendChild(lastAi);lastAi=null}var b=document.getElementById('bar');
+  running=j.running;curLevel=j.level||0;curPlan=[j.plan_done||0,j.plan_n||0];if(!running)stopping=false;if(!running&&lastAi&&!doneShown){chat.appendChild(lastAi);lastAi=null}var b=document.getElementById('bar');
   b.style.display=running?'flex':'none';
   var W={READ:'Padh raha hoon',WRITE:'Likh raha hoon',WRITEB64:'Likh raha hoon',EDIT:'Badal raha hoon',RUN:'Chala ke dekh raha hoon',BG:'Background me chala raha hoon',VERIFY:'Jaanch raha hoon',GREP:'Dhundh raha hoon',TREE:'Files dekh raha hoon',WEB:'Web padh raha hoon',SEARCH:'Search kar raha hoon',UNZIP:'Khol raha hoon',LOOK:'PDF dekh raha hoon'};
-  document.getElementById('bt').textContent=(W[lastKind]||'Soch raha hoon')+'… '+(j.plan_n?'('+j.plan_done+'/'+j.plan_n+')':'');
+  document.getElementById('bt').textContent=stopping?'Ruk raha hoon…':(W[lastKind]||'Soch raha hoon')+'… '+(j.plan_n?'('+j.plan_done+'/'+j.plan_n+')':'');
   sendIcon();document.getElementById('t').placeholder=j.asking?'Jawab likho...':(running?'Beech me bhejo (queue)...':'Kaam likho...');
   document.getElementById('ttl').innerHTML='';var tt=document.getElementById('ttl');tt.appendChild(document.createTextNode('📂 '+j.proj+' '));tt.appendChild(el('i',null,'▾'));if(j.mode)tt.appendChild(el('span','badge '+j.mode,j.mode));
   if(near&&j.events.length)chat.scrollTop=chat.scrollHeight
@@ -5366,9 +5386,14 @@ setInterval(poll,1000);poll();
 function post(p,b){return fetch(p,{method:'POST',body:JSON.stringify(b||{})})}
 function act(p){post(p).then(poll)}
 function act2(p,b){return post(p,b).then(function(r){if(!r.ok)return r.text().then(function(t){alert(t)})}).catch(function(e){alert('Server se baat nahi hui: '+e.message)})}
-function sendIcon(){var v=document.getElementById('t').value.trim();var sb=document.getElementById('send'),st=running&&!v;sb.textContent=st?'\u2715':'\u27A4';sb.classList.toggle('stop',st);if(!running)sb.classList.remove('busy')}
+function sendIcon(){var v=document.getElementById('t').value.trim();var sb=document.getElementById('send'),st=running&&!v;sb.textContent=st?(stopping?'⏳':'✕'):'➤';sb.classList.toggle('stop',st);sb.classList.toggle('busy',st&&stopping)}
+function askStop(){var d=document.getElementById('cfm'),p=curPlan;
+ document.getElementById('cfmt').textContent=p[1]?(p[0]+'/'+p[1]+' kadam ho chuke hain. Rokne par aadha kaam reh jayega.'):'Kaam abhi chal raha hai. Rokne par aadha kaam reh jayega.';
+ d.style.display='flex'}
+function cfmNo(){document.getElementById('cfm').style.display='none'}
+function cfmYes(){cfmNo();stopNow()}
 function sendBtn(){var t=document.getElementById('t'),v=t.value.trim();
- if(running&&!v){stopNow();return}
+ if(running&&!v){if(stopping)return;if(curLevel>3)askStop();else stopNow();return}
  if(sending||!v)return;
  sending=true;running=true;
  t.value='';t.style.height='auto';
@@ -5386,14 +5411,24 @@ var FILES=[],AGE={};
 function ago(s){if(s<90)return 'abhi';if(s<3600)return Math.floor(s/60)+' min';if(s<86400)return Math.floor(s/3600)+' ghante';return Math.floor(s/86400)+' din'}
 function openFiles(){sheet.style.display='flex';
  fetch('/files').then(r=>r.json()).then(function(j){FILES=j.files;AGE=j.age||{};drawFiles();document.getElementById('fl').scrollTop=0})}
+var OPENF={},FCOL={py:'#3776ab',js:'#ca8a04',ts:'#2563eb',html:'#e34f26',css:'#0ea5e9',json:'#64748b',md:'#475569',txt:'#64748b',pdf:'#dc2626',png:'#16a34a',jpg:'#16a34a',kt:'#7c3aed',java:'#ea580c',xml:'#0d9488',yml:'#0d9488',yaml:'#0d9488',sh:'#334155',zip:'#92400e'};
+function fileRow(n,d,showDir){var ext=(n.split('.').pop()||'').toLowerCase(),base=n.split('/').pop(),dir=n.indexOf('/')>=0?n.slice(0,n.lastIndexOf('/')):'';
+ var w=el('div');var r=el('div','frow');var ic=el('div','fic',(n.indexOf('.')>=0?ext:'file').slice(0,4).toUpperCase());ic.style.background=FCOL[ext]||'#64748b';r.appendChild(ic);
+ var m=el('div','fnm');m.appendChild(el('b',null,base));var sm=[];if(showDir&&dir)sm.push(dir);if(AGE[n]!=null)sm.push(ago(AGE[n]));if(sm.length)m.appendChild(el('small',null,sm.join('  ·  ')));
+ m.onclick=function(){show(n)};r.appendChild(m);
+ var ac=el('div','fact');var kb=el('button','fkb','⋮');kb.onclick=function(){ac.classList.toggle('on')};r.appendChild(kb);
+ var rn=el('button',null,'Naam badlo');rn.onclick=function(){var to=prompt('Naya naam:',n);if(to&&to!==n)act2('/rename',{p:n,to:to}).then(openFiles)};
+ var dw=el('a',null,'Download');dw.href='/download?p='+encodeURIComponent(n);dw.setAttribute('download','');
+ var dl=el('button',null,'Delete');dl.style.color='#dc2626';dl.onclick=function(){if(confirm(n+' delete karu?'))act2('/delete',{p:n}).then(openFiles)};
+ ac.appendChild(rn);ac.appendChild(dw);ac.appendChild(dl);w.appendChild(r);w.appendChild(ac);d.appendChild(w)}
 function drawFiles(){var q=(document.getElementById('fq').value||'').toLowerCase(),d=document.getElementById('fl');d.innerHTML='';
  var list=FILES.filter(function(n){return !q||n.toLowerCase().indexOf(q)>=0});
  if(!list.length){d.textContent=FILES.length?'(kuch nahi mila)':'(abhi koi file nahi)';return}
- list.forEach(function(n){var r=el('div','row');var s=el('span',null,'📄 '+n);s.onclick=function(){show(n)};r.appendChild(s);
-  if(AGE[n]!=null)r.appendChild(el('small','age',ago(AGE[n])));
-  var rn=el('a',null,'✏️');rn.onclick=function(){var to=prompt('Naya naam:',n);if(to&&to!==n)act2('/rename',{p:n,to:to}).then(openFiles)};r.appendChild(rn);
-  var dl=el('a',null,'🗑');dl.onclick=function(){if(confirm(n+' delete karu?'))act2('/delete',{p:n}).then(openFiles)};r.appendChild(dl);
-  var a=el('a',null,'⬇');a.href='/download?p='+encodeURIComponent(n);a.setAttribute('download','');r.appendChild(a);d.appendChild(r)})}
+ if(q){list.forEach(function(n){fileRow(n,d,true)});return}
+ var root=[],grp={};list.forEach(function(n){var k=n.indexOf('/')>=0?n.split('/')[0]:'';if(k)(grp[k]=grp[k]||[]).push(n);else root.push(n)});
+ root.forEach(function(n){fileRow(n,d,false)});
+ Object.keys(grp).sort().forEach(function(k){var open=OPENF[k]!==false;var h=el('div','fgrp');h.appendChild(el('span',null,open?'▾':'▸'));h.appendChild(el('span',null,k));h.appendChild(el('span','n',String(grp[k].length)));
+  h.onclick=function(){OPENF[k]=!open;drawFiles()};d.appendChild(h);if(open)grp[k].forEach(function(n){fileRow(n,d,true)})})}
 function closeFiles(){sheet.style.display='none';hideFv()}
 var curFile='',curText='';
 function hideFv(){['fv','fh','fm','fp'].forEach(function(i){document.getElementById(i).style.display='none'})}
@@ -5500,7 +5535,8 @@ class H(BaseHTTPRequestHandler):
                                         "max": MAX_STEPS, "prov": STATE["prov"], "boot": BOOT, "proj": STATE["proj"],
                                         "plan_n": len(STATE["plan_items"]), "plan_done": len(STATE["plan_ck"]),
                                         "mode": cur_mode() if STATE.get("task") else "",
-                                        "asking": bool(STATE.get("asking")), "queued": len(STATE["pending"])}))
+                                        "asking": bool(STATE.get("asking")), "queued": len(STATE["pending"]),
+                                        "level": int(STATE.get("level") or 0) if STATE["running"] else 0}))
         elif u.path == "/config":
             self._send(200, json.dumps({"conf": conf_dump(), "status": conf_status()}))
         elif u.path == "/files":
@@ -5908,7 +5944,7 @@ EXAM_SYS = ("You examine ONE task from a user of a phone coding/document assista
             "Each done item must be checkable by reading a file or running a command. "
             "questions: ONLY for code/android, max 3, ONLY choices the user did NOT already state: programming language or framework, "
             "how it will be built or run (for example GitHub Actions APK build, Termux, Docker), and one key feature or UI choice. "
-            "2-4 short options each. For light/chat tasks questions=[]. Write in the user's language style (Hinglish ok).")
+            "2-4 short options each. If level is 3 or less ask at most 1 question; never ask how a link, button or message should look. For light/chat tasks questions=[]. Write in the user's language style (Hinglish ok).")
 TYPE_RANK = {"android": 3, "code": 2, "light": 1, "chat": 0}
 
 
@@ -5997,30 +6033,51 @@ PLAN_SYS = ("You plan ONE software task as a senior engineer. Reply ONLY JSON, n
             '"steps":["ordered build steps, ONE file or ONE feature per step, last step = verification (compile/@@VERIFY)"],'
             '"spec":["3-12 testable behaviours incl. empty or invalid input and error cases"]}. '
             "Size must match LEVEL (given lines and files): do not over-build small tasks, do not under-build big ones. "
+            "Build ONLY what the TASK and the BRIEF ask for. Do NOT add deployment or hosting config, webhooks, CI, docs or other extras "
+            "unless the task names them. Keep steps minimal. "
             "Respect the user's answers. For an Android app step 1 is '@@TEMPLATE android <package> <AppName>' and the build is on GitHub Actions. "
             "Write short plain lines (Hinglish ok).")
-MERGE_PLAN_SYS = ("You get several plans (JSON) for the SAME task. Merge them into ONE best plan: keep the useful union of files, UI, "
-                  "advanced features, steps and spec lines, drop duplicates, keep the size right for LEVEL. Reply ONLY JSON with the same schema "
+MERGE_PLAN_SYS = ("You get several plans (JSON) for the SAME task. Merge them into ONE best plan: keep the SMALLEST set of files, UI, "
+                  "steps and spec lines that fully does the TASK and BRIEF; drop duplicates and every extra the task did not ask for; keep the size right for LEVEL. Reply ONLY JSON with the same schema "
                   "{files,ui,advanced,steps,spec}.")
-GAP_SYS = ("You check a PLAN against the TASK. List what is still MISSING for a real user to get a working result (files, screens, "
-           "error cases, config, build step). Reply ONLY JSON: {\"missing\":[\"...\"]}. Use [] if nothing important is missing.")
+GAP_SYS = ("You check a PLAN against the TASK and BRIEF. List ONLY what is missing without which the requested thing will NOT work at all. "
+           "Do NOT list deployment/hosting config, webhooks, docs, extra features, scaling or edge-case polish; stay inside the BRIEF. "
+           "Each item max 12 words. Reply ONLY JSON: {\"missing\":[\"...\"]}. Use [] if nothing essential is missing (this is the normal answer).")
 FIX_PLAN_SYS = ("You get a PLAN (JSON) and a MISSING list. Return the improved full plan as ONLY JSON with the same schema "
-                "{files,ui,advanced,steps,spec}, with every missing item added.")
+                "{files,ui,advanced,steps,spec}, with ONLY the missing items added; keep the plan small.")
 
 
 def _plan_ok(d):
     return isinstance(d, dict) and isinstance(d.get("steps"), list) and len([x for x in d["steps"] if str(x).strip()]) >= 2
 
 
+def make_brief(task, goal, level):
+    """Chhota pakka brief jo har AI (planner, merger, checker, writer) ko dikhe: ek dimag."""
+    ans = re.findall(r"\[User ke jawab: (.*?)\]", task, re.S)
+    L = ["BRIEF (sab AI ke liye pakka, isse bahar mat jao):",
+         "- Kaam: " + clip(goal, 200),
+         "- Level %d/10: utna hi banao, extra nahi." % level]
+    if ans:
+        L.append("- User ke jawab: " + clip(ans[-1], 400))
+    L.append("- Sirf wahi banao jo user ne maanga. Deploy/hosting config, webhook, CI, docs ya extra features tabhi jab task me likhe ho.")
+    L.append("- Agar user ne 'sabhi / sabe / all' chuna ho to sabse simple EK option lo, saare nahi.")
+    return "\n".join(L)
+
+
 def plan_pipeline(task, goal, level, typ):
     """Plan banata hai, STATE/SPEC/PROJECT.md me rakhta hai. Text lautata hai jo AI ke pehle message me judta hai ('' = nahi bana)."""
     lo, hi, nf = LEVEL_SCOPE[level]
-    user = "TASK:\n%s\n\nGOAL: %s\nTYPE: %s\nLEVEL: %d/10 (about %d-%d lines, about %d files)\nEXISTING FILES: %s" % (
-        task[:2000], goal, typ, level, lo, hi, nf, ", ".join(list_files(40)) or "(none)")
-    slots = pick_slots(PLANNER_PREF, 3, len(user) + len(PLAN_SYS))
+    brief = make_brief(task, goal, level)
+    STATE["brief"] = brief
+    n_plan = 1 if level <= 3 else (2 if level <= 6 else 3)          # chhota kaam = ek planner
+    gap_rounds = 1 if level <= 6 else PLAN_GAP_ROUNDS
+    max_miss = 2 if level <= 3 else (4 if level <= 6 else 8)
+    user = "%s\n\nTASK:\n%s\n\nGOAL: %s\nTYPE: %s\nLEVEL: %d/10 (about %d-%d lines, about %d files)\nEXISTING FILES: %s" % (
+        brief, task[:3000], goal, typ, level, lo, hi, nf, ", ".join(list_files(40)) or "(none)")
+    slots = pick_slots(PLANNER_PREF, n_plan, len(user) + len(PLAN_SYS))
     if not slots:
         return ""
-    ev("note", text="🗳 plan: %s mil ke bana rahe hain (level %d/10)..." % (" + ".join(n for n, _ in slots), level))
+    ev("note", text="🗳 plan: %s (level %d/10)" % (" + ".join(n for n, _ in slots), level))
     plans = []
     for (nm, _), t in zip(slots, par_calls(slots, PLAN_SYS, user)):
         d = parse_json_reply(t) if t else None
@@ -6037,7 +6094,7 @@ def plan_pipeline(task, goal, level, typ):
         if _plan_ok(d):
             plan = d
             ev("note", text="🧩 %s ne %d plan jod ke ek kiya" % (mg[0][0], len(plans)))
-    for rnd in range(PLAN_GAP_ROUNDS):                   # kuch bacha to nahi?
+    for rnd in range(gap_rounds):                   # kuch bacha to nahi?
         if STATE["cancel"]:
             break
         ck = pick_slots(("GROQ", "DS", "JAAT"), 3)
@@ -6046,10 +6103,10 @@ def plan_pipeline(task, goal, level, typ):
             break
         t = call_slot(ck[0][0], ck[0][1], GAP_SYS, user + "\n\nPLAN:\n" + json.dumps(plan, ensure_ascii=False)[:5000])
         d = parse_json_reply(t) if t else None
-        miss = [clip(str(x), 160) for x in ((d or {}).get("missing") or [])][:8] if isinstance(d, dict) else []
+        miss = [clip(str(x), 110) for x in ((d or {}).get("missing") or [])][:max_miss] if isinstance(d, dict) else []
         if not miss:
             break
-        ev("note", text="🔎 plan me ye chhoota tha (%s): %s" % (ck[0][0], " ; ".join(miss)))
+        ev("note", text="🔎PLANCHK\n%s\n%s" % (ck[0][0], "\n".join(miss)))
         fx = pick_slots(("JAAT", "GROQ"), 2)
         fx = [(n, m) for n, m in fx if fits(n, 9000)][:1]
         if not fx:
@@ -6077,7 +6134,7 @@ def plan_pipeline(task, goal, level, typ):
     except OSError:
         pass
     STATE["strong_n"] = GEM_BUILD_STEPS
-    return ("\n[PLAN TAIYAR: %s ne plan banaya, Gemini ne jodha. Level %d/10 (kareeb %d-%d lines). FILES: %s. UI: %s. ADVANCED: %s. "
+    return ("\n" + brief + "\n[PLAN TAIYAR: %s ne plan banaya. Level %d/10 (kareeb %d-%d lines). FILES: %s. UI: %s. ADVANCED: %s. "
             "PLAN aur SPEC set ho chuke hain (PROJECT.md, SPEC.md): dobara mat banao, seedha kadam 1 se kaam shuru karo.]" % (
                 ", ".join(n for n, _ in plans), level, lo, hi, "; ".join("%s (%s)" % (p, clip(w, 50)) for p, w in files) or "-",
                 "; ".join(ui) or "-", "; ".join(adv) or "-"))
@@ -6107,7 +6164,7 @@ def do_understand(task):
     extra = ""
     if not forced:
         ans_l = []
-        for q in ex["questions"]:
+        for q in ex["questions"][: (1 if level <= 3 else 3)]:
             ans, how = ask_user(q["q"], q["options"], ctx="Task: " + task[:500])
             if how == "stop":
                 return ""
