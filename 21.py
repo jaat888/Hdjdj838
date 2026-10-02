@@ -33,8 +33,9 @@ def _env(name, default=""):
 #   min_gap    is provider par do request ke beech kam se kam itne second
 #   rate_cool  429/limit aane par itne second aaram (Gemini ka lock ~2 ghante => 7200)
 #   retry_429  429 aane par usi provider ko itni baar (ruk ke) dobara try karo, phir hi cooldown (default 1)
-PRIORITY = ["JAAT", "GEM", "GEM2", "GEM3", "DS", "GROQ", "NV2", "DAI", "DSX"]
+PRIORITY = ["JAAT", "GEM", "GEM2", "GEM3", "DS", "GROQ", "NV2", "DAI"]
 DISABLED = set()
+REMOVED = {"DSX"}           # DSX hata diya (bekar tha); purani providers.json me ho to chupchap chhod do
 APIS = {
     "JAAT": {                      # JAAT (main, sabse zyada yahi chalega). Ek time par 1 request; 429 par 2 baar retry, cooldown bahut kam
         "type": "oai",
@@ -49,18 +50,6 @@ APIS = {
         "min_gap": 1,
         "rate_cool": 15,           # 429 ke baad sirf 15 sec aaram (lock nahi)
         "retry_429": 2,            # 429 par 2 baar ruk ke dobara
-    },
-    "DSX": {                       # DeepSeek (ab sabse last). Key: environment me DSX_KEY, ya ⚙ se
-        "type": "oai",
-        "base": "https://my-ds-api.jaat.blitz.cloud/v1",
-        "key": _env("DSX_KEY"),
-        "models": ["deepseek-default"],
-        "timeout": 180,
-        "total_timeout": 400,
-        "group": "deepseek",
-        "max_conc": 1,
-        "min_gap": 1,
-        "rate_cool": 45,
     },
     "GEM": {                       # Gemini #1 (secondary)
         "type": "oai",
@@ -109,11 +98,11 @@ APIS = {
         "type": "oai",
         "base": "https://api.groq.com/openai/v1",
         "key": _env("GROQ_KEY"),
-        "timeout": 60,             # Groq tez hai: 60s me jawab na aaye to agla AI
-        "total_timeout": 120,
+        "timeout": 5,              # Groq tez hai: 5s tak kuch na aaye to seedha agla AI (DS wagairah)
+        "total_timeout": 30,       # poora jawab (stream) 30s se lamba nahi
         "min_gap": 2,
         "rate_cool": 60,           # 429 par 1 min aaram (lock nahi)
-        "retry_429": 1,
+        "retry_429": 0,            # 429 par ruk ke dobara nahi, seedha agla AI
         "models": [
             "openai/gpt-oss-120b",
             "llama-3.3-70b-versatile",
@@ -344,7 +333,7 @@ ROT = {}                   # group -> ginti (baari-baari ke liye)
 COOL_FILE = os.path.join(ROOT, ".mumbai", "cool.json")      # restart/rebuild ke baad bhi lock yaad rahe
 CONF_FILE = os.path.join(ROOT, ".mumbai", "providers.json")  # bina rebuild ke provider badalne ki file
 _CONF_MT = [0.0]
-CONF_VER = 19              # purani providers.json ka priority (JAAT pehle, DSX last) naye order ko na bigaade
+CONF_VER = 19              # purani providers.json ka priority (JAAT pehle, DSX hata) naye order ko na bigaade
 CONF_KEYS = ("type", "base", "key", "models", "timeout", "total_timeout", "max_chars", "max_url", "max_ctx",
              "max_tokens", "vision", "tier", "group", "max_conc", "min_gap", "rate_cool", "retry_429", "no_system")
 
@@ -471,6 +460,8 @@ def conf_apply(text, write=False):
         raise ValueError("sabse upar {} object chahiye")
     newp = {}
     for name, c in (d.get("providers") or {}).items():
+        if name in REMOVED:
+            continue
         if not isinstance(c, dict) or not re.fullmatch(r"\w{1,20}", str(name)):
             raise ValueError("provider '%s' galat" % name)
         base, c = dict(APIS.get(name, {})), dict(c)
@@ -963,8 +954,19 @@ def ask_plain(name, cfg, msgs):
     return None
 
 
+REFUSE_RE = re.compile(r"^\W*(i\s+(cannot|can't|can\s?not|am\s+unable\s+to|won't)\s+(fulfill|help|assist|comply|do\s+that|provide)|"
+                       r"i'?m\s+(sorry|unable)[^.\n]{0,40}(can't|cannot|unable)|sorry,?\s+(but\s+)?i\s+(can't|cannot))", re.I)
+
+
+def is_refusal(text):
+    """Chhota 'I cannot fulfill this request' jaisa jawab (koi @@ command nahi): ise history me mat daalo, agla AI try karo."""
+    t = (text or "").strip()
+    return bool(t) and len(t) < 200 and "@@" not in t and bool(REFUSE_RE.search(t))
+
+
 def ask(msgs, role="write"):
     """(naam, jawab, kat_gaya?) ya None. role: plan = sabse mazboot pehle, write = sasta/tez pehle."""
+    refused = None
     for name in role_order(role):
         if STATE["cancel"]:
             return None
@@ -983,6 +985,10 @@ def ask(msgs, role="write"):
                 ev("note", text="↻ %s dobara (%d/3)" % (name, attempt + 2))
                 if not nap(2 * (attempt + 1)):
                     return None
+        if res and is_refusal(res[0]):
+            ev("note", text="↷ %s ne mana kar diya (%s), agla AI try kar raha hoon" % (name, res[0].strip()[:50]))
+            refused = refused or (name, res[0], res[1])
+            res = None
         if res:
             if COOL.pop(name, None) is not None:
                 save_cool()
@@ -990,7 +996,7 @@ def ask(msgs, role="write"):
             rotated(name)
             log("← %s %.0fs%s" % (name, time.time() - t, " (kata hua)" if res[1] else ""))
             return name, res[0], res[1]
-    return None
+    return refused
 
 
 # ================= FORMATS: har type ki file padho/banao (sirf stdlib; pypdf ho to PDF padhne me wo bhi) =================
@@ -2878,7 +2884,7 @@ SPEC_GATE, REVIEW_LOOP = True, True
 SPEC_REJECT_MAX, REVIEW_ROUNDS, FINAL_REJECT_MAX = 4, 5, 8
 REVIEWER_TRIES, REVIEWER_TIMEOUT, REVIEWER_TOKENS = 3, 300, 6000
 REVIEWER_PREF = "JAAT"
-REVIEW_GEMINI = True    # review me Gemini bhi, par sabse LAST me (baari-baari); pehle JAAT, Groq, NV2, DSX, DS chalte hain taaki Gemini ka limit kam kharch ho
+REVIEW_GEMINI = True    # review me Gemini bhi, par sabse LAST me (baari-baari); pehle JAAT, Groq, NV2, DS chalte hain taaki Gemini ka limit kam kharch ho
 REVIEW_EXT = (".kt", ".java", ".py", ".js", ".ts", ".go", ".rs", ".c", ".cpp", ".xml", ".html", ".css", ".kts", ".gradle")
 SPEC_FILE = "SPEC.md"
 _LAST_BUSY = [0.0]
@@ -3159,7 +3165,7 @@ def parse_json_reply(text):
 
 
 def reviewer_names(writer=None):
-    """Review ka order: JAAT, baaki oai (Groq, NV2, DSX...), phir DS (chhoti file par), sabse last Gemini (baari-baari)."""
+    """Review ka order: JAAT, baaki oai (Groq, NV2...), phir DS (chhoti file par), sabse last Gemini (baari-baari)."""
     alln = [n for n in order() if APIS[n]["type"] in ("oai", "proxy_get")]
     gem = [n for n in alln if group_of(n) == "gemini"]
     oai = [n for n in alln if APIS[n]["type"] == "oai" and n not in gem]
@@ -3195,7 +3201,7 @@ def reviewer_call(system, user):
         for t in range(REVIEWER_TRIES):
             if STATE["cancel"]:
                 return None, None
-            cfg = dict(APIS[name], max_tokens=REVIEWER_TOKENS, total_timeout=min(REVIEWER_TIMEOUT, APIS[name].get("total_timeout", REVIEWER_TIMEOUT)))
+            cfg = dict(APIS[name], max_tokens=REVIEWER_TOKENS, timeout=max(APIS[name].get("timeout", 60), 30), total_timeout=min(REVIEWER_TIMEOUT, max(APIS[name].get("total_timeout", REVIEWER_TIMEOUT), 120)))
             try:
                 res = ask_review(name, cfg, system, user)
             except Exception as e:
@@ -3243,8 +3249,9 @@ def review_file(rel, writer=None):
     ctx = ("Project resources -> " + res_summary()) if rel.endswith((".kt", ".java", ".xml")) and android else ""
     user = "SPEC:\n%s\n\n%s\n\nOTHER FILES (outline):\n%s\n%s\n\nFILE: %s\n%s" % (
         "\n".join(TRACK["spec"]) or "(none)", all_files_line(), outline(exclude=rel, limit=3500) or "(none)", ctx, rel, _numbered(txt))
-    ev("note", text="🔍 %s ka review (round %d, 2 model se)..." % (rel, TRACK["rounds"][rel]))
-    outs = dual_call(REVIEW_SYS8 + FILES_NOTE + (ANDROID_PITFALLS if android else ""), user)
+    ev("note", text="🔍 %s ka review (round %d)..." % (rel, TRACK["rounds"][rel]))
+    _rs = REVIEW_SYS8 + FILES_NOTE + (ANDROID_PITFALLS if android else "")
+    outs = scan_call(_rs, user, rel) if (CODE_FLOW and cur_mode() in ("code", "android")) else dual_call(_rs, user)
     lists, provs = [], []
     for t, lab in outs:
         b = _norm_bugs(parse_json_reply(t), rel)
@@ -3252,7 +3259,8 @@ def review_file(rel, writer=None):
             lists.append(drop_phantom(b))
             provs.append(lab)
     if not lists:
-        ev("note", text="⚠ %s: reviewer nahi mila, is file ka review chhoda" % rel)
+        ev("note", text="⚠ %s: reviewer nahi mila, agle @@EDIT/@@WRITE par dobara review hoga" % rel)
+        TRACK["rounds"][rel] = max(0, TRACK["rounds"].get(rel, 1) - 1)      # fail hua round ginti me nahi
         return None, ""
     return merge_bugs(lists), ", ".join(provs)
 
@@ -3541,7 +3549,7 @@ def call_slot(name, model, system, user):
     for t in range(REVIEWER_TRIES):
         if STATE["cancel"]:
             return None
-        cfg = dict(APIS[name], models=[model], max_tokens=REVIEWER_TOKENS, total_timeout=min(REVIEWER_TIMEOUT, APIS[name].get("total_timeout", REVIEWER_TIMEOUT)))
+        cfg = dict(APIS[name], models=[model], max_tokens=REVIEWER_TOKENS, timeout=max(APIS[name].get("timeout", 60), 30), total_timeout=min(REVIEWER_TIMEOUT, max(APIS[name].get("total_timeout", REVIEWER_TIMEOUT), 120)))
         try:
             res = ask_review(name, cfg, system, user)
         except Exception as e:
@@ -4399,6 +4407,7 @@ def run_agent(task):
                 out.append("[PLAN] theek hai. Kadam 1 se shuru karo, har kadam ke baad @@CHECK n.")
                 continue
             if k == "CHECK":
+                scan_dirty_files()          # file poori hui: 4 AI scan, clean to Groq ka memory card
                 if any(TRACK["bugs"].values()) and rej["bugchk"] < 3:
                     rej["bugchk"] += 1
                     out.append("[CHECK %s] mana: reviewer ke bug khule hain, pehle inhe band karo:\n%s" % (a, bug_text({f: b for f, b in TRACK["bugs"].items() if b})))
@@ -4515,10 +4524,10 @@ def run_agent(task):
 
 
 # ================= 21.py: samajh, done-criteria, naya raasta, user se poochna, seekha, PDF dekhna =================
-ASK_WAIT = float(_env("ASK_WAIT", "3600"))          # user ke jawab ka intezaar (second). Na aaye to 3 AI faisla karte hain
+ASK_WAIT = float(_env("ASK_WAIT", "600"))           # user ke jawab ka intezaar (second, 10 min). Na aaye to 3 AI faisla karte hain
 CRIT_REJECT_MAX, ESC_AT, ESC_MAX = 2, 4, 2          # criteria 2 baar mana; aakhri review 4 baar mana -> user se poochho; ek kaam me max 2 baar
 SPLIT_ROLES = _env("SPLIT_ROLES", "1") != "0"       # plan/review mazboot model se, likhna sasta/tez model se (0 = band)
-TIER = {"JAAT": "strong", "NV2": "strong", "GEM": "strong", "GEM2": "strong", "GEM3": "strong", "DSX": "strong",
+TIER = {"JAAT": "strong", "NV2": "strong", "GEM": "strong", "GEM2": "strong", "GEM3": "strong",
         "DS": "cheap", "GROQ": "cheap", "DAI": "cheap"}          # providers.json me "tier": "strong"/"cheap" se badal sakte ho
 SEEKHA_FILE = os.path.join(ROOT, ".mumbai", "seekha.md")
 PREVIEW_DIR = os.path.join(ROOT, ".mumbai", "preview")
@@ -4529,8 +4538,25 @@ def tier(name):
     return APIS[name].get("tier") or TIER.get(name, "strong")
 
 
+LIGHT_PREF = ("DS", "GROQ", "GEM", "GEM2", "GEM3")      # chhote (light) kaam me pehle ye, JAAT/baaki baad me
+
+
 def role_order(role):
     names = order()
+    try:
+        _m = cur_mode()
+        if _m == "light":
+            pref = [n for n in LIGHT_PREF if n in names]
+            return pref + [n for n in names if n not in pref]
+        if _m in ("code", "android") and CODE_FLOW:
+            pref = [n for n in (CODE_PLAN_PREF if role == "plan" else CODE_WRITE_PREF) if n in names]
+            rest = [n for n in names if n not in pref]
+            if role != "plan":      # likhne me Gemini sabse last (uska limit bachao)
+                gem = [n for n in rest if group_of(n) == "gemini"]
+                rest = [n for n in rest if n not in gem] + gem
+            return pref + rest
+    except Exception:
+        pass
     if not SPLIT_ROLES:
         return names
     if role == "write":
@@ -4590,7 +4616,7 @@ UNDERSTAND_SYS = ("You read ONE task from a user of a phone coding/document assi
                   "Write goal and done in the user's language style (Hinglish ok).")
 
 
-def do_understand(task):
+def _do_understand_orig(task):
     """Naye kaam par 3 line: maqsad, type, done-criteria. Text jo AI ke pehle message me judta hai ('' = kuch nahi)."""
     if len(task.split()) < 4:
         return ""
@@ -4726,7 +4752,7 @@ def done_gate():
     return final_gate() or pdf_gate() or criteria_gate()
 
 
-# ---------- user se poochna: 1 ghanta, phir 3 AI ----------
+# ---------- user se poochna: 10 min, phir 3 AI ----------
 TG_OFF = [None]
 
 
@@ -4804,7 +4830,7 @@ def council(q, opts, ctx=""):
 
 def ask_user(question, options=None, ctx=""):
     """(jawab, kisne) kisne = 'user' | 'council' | 'stop'. Kaam jaisa hai waisa rukta hai (file nahi badalti).
-    Telegram/ntfy par message jata hai; Telegram me reply bhi chalta hai. ASK_WAIT (1 ghanta) me jawab na aaye to 3 AI faisla karte hain."""
+    Telegram/ntfy par message jata hai; Telegram me reply bhi chalta hai. ASK_WAIT (10 min) me jawab na aaye to 3 AI faisla karte hain."""
     q = clip((question or "").strip(), 500) or "Aage kya karun?"
     opts = [str(o)[:120] for o in (options or [])][:4]
     STATE["answer"] = None
@@ -5092,8 +5118,8 @@ p.addEventListener('keydown',function(e){if(e.key=='Enter')go()});
 PAGE = r"""<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Mumbai</title><style>
-:root{--bg:#faf9f5;--fg:#1f1e1d;--mut:#77756f;--card:#f0eee6;--bd:#e0ddd2;--acc:#c96442}
-@media(prefers-color-scheme:dark){:root{--bg:#262624;--fg:#eceae4;--mut:#9a978f;--card:#33322f;--bd:#45433f}}
+:root{--bg:#fff;--fg:#111827;--mut:#6b7280;--card:#f3f4f6;--bd:#e5e7eb;--acc:#2563eb}
+:root{color-scheme:light}
 *{box-sizing:border-box}html,body{height:100%;margin:0}
 body{background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif;display:flex;flex-direction:column}
 header{display:flex;align-items:center;gap:2px;padding:6px 8px;border-bottom:1px solid var(--bd);background:var(--bg)}
@@ -5155,13 +5181,37 @@ footer textarea{flex:1;max-height:130px;resize:none;border:1px solid var(--bd);b
 #fh{display:none;align-items:center;gap:6px;padding:6px 12px;border-top:1px solid var(--bd)}#fh b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:13px}
 #fm{display:none;max-width:100%;max-height:60vh;margin:8px auto}#fp{display:none;width:100%;height:55vh;border:0}
 #fv{display:none;margin:0;padding:10px 12px;border-top:1px solid var(--bd);font-size:12px;white-space:pre-wrap;word-break:break-all;max-height:45%;overflow:auto}
+header{position:relative;padding:10px 14px}
+header b{max-width:none;font-size:17px;font-weight:600;letter-spacing:-.2px}
+#mnb{font-size:22px;line-height:1;padding:6px 12px;color:var(--fg)}
+#menu{display:none;position:absolute;right:10px;top:52px;background:#fff;border:1px solid var(--bd);border-radius:14px;box-shadow:0 8px 28px rgba(17,24,39,.14);padding:6px;z-index:9;min-width:170px}
+#menu button{display:block;width:100%;background:none;border:0;padding:12px 14px;font-size:15px;color:var(--fg);border-radius:10px;text-align:left}
+#menu button:active{background:var(--card)}
+body{font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.user{background:#111827;color:#fff;border-radius:18px 18px 4px 18px}
+.step{border-radius:10px;font-size:13px}
+.step.plan{background:#fff;border-color:var(--bd)}
+.step.plan .it{padding:5px 12px;font-size:13px;color:var(--fg)}
+.step.plan .it.ok{color:var(--mut)}
+.done{border:1px solid #bbf7d0;background:#f0fdf4;border-left:3px solid #16a34a;border-radius:12px;padding:12px 14px}
+.note{font-size:12px}
+footer textarea{background:#fff;box-shadow:0 1px 3px rgba(17,24,39,.08)}
+#send{background:#111827;width:44px;height:44px;font-size:17px;touch-action:manipulation;display:flex;align-items:center;justify-content:center}
+#send.stop{background:#dc2626;font-size:15px}
+#send.busy{opacity:.5}
+html,body{max-width:100%;overflow-x:hidden;overscroll-behavior-x:none}
+#chat{min-width:0;width:100%;overflow-x:hidden;touch-action:pan-y;overscroll-behavior-x:none}
+#chat>*{min-width:0;max-width:min(760px,100%);box-sizing:border-box}
+.msg,.step,.step summary,.step .it,.step pre,.note,.ln,.md,.md *{overflow-wrap:anywhere;word-break:break-word}
+.step{overflow:hidden}
+.md pre,.md code{white-space:pre-wrap}
+.md pre{overflow-x:auto;max-width:100%}
+.md table{display:block;max-width:100%;overflow-x:auto}
+.md img,.step img{max-width:100%;height:auto}
 </style></head><body>
 <header><b id=ttl onclick="openProjects()" title="Project / chat badlo">🌇 Mumbai <i>▾</i></b><span class=sp></span>
-<button class="ib tb" onclick="act('/test')">🩺<small>Test</small></button>
-<button class="ib tb" onclick="openConf()">⚙<small>AI</small></button>
-<button class="ib tb" onclick="openFiles()">📁<small>Files</small></button>
-<button class="ib tb" onclick="act('/undo')">↩<small>Undo</small></button>
-<button class="ib tb" onclick="act('/new')">🆕<small>Naya</small></button></header>
+<button class=ib id=mnb type=button onclick="toggleMenu(event)" aria-label=Menu>&#8943;</button>
+<div id=menu><button type=button onclick="mnu('/test')">Test</button><button type=button onclick="mnu('conf')">AI settings</button><button type=button onclick="mnu('files')">Files</button><button type=button onclick="mnu('/undo')">Undo</button><button type=button onclick="mnu('/new')">New chat</button></div></header>
 <div id=chat><div id=hint>Kaam likho, jaise "ek todo app banao html me".<br>Main files bana ke dunga. 📁 me dekh aur download kar sakte ho. Upar project ka naam (▾) dabao to dusra project / chat khul jayega.</div></div>
 <div id=bar><span class=st>✻</span><span class=tx id=bt>Soch raha hoon…</span></div>
 <footer>
@@ -5224,9 +5274,19 @@ function inner(line,bad){ /* andar ki jaanch: sab review/SPEC/CHECK ek band line
 var INNER=/^(🔍|🧪|🚶|✨|📐|🧾)/,askBox=null;
 function drawPlan(){if(!planBox)return;var done=planBox.items.filter(function(x){return x.ok}).length,n=planBox.items.length;
  planBox.sum.textContent='📋 Plan · '+done+'/'+n;planBox.bar.style.width=(n?100*done/n:0)+'%';
- planBox.items.forEach(function(x){x.d.textContent=(x.ok?'✅ ':'⬜ ')+x.t;x.d.className='it'+(x.ok?' ok':'')});
+ planBox.items.forEach(function(x){x.d.textContent=(x.ok?'\u2713  ':'\u25CB  ')+x.t;x.d.className='it'+(x.ok?' ok':'')});
  if(done==n&&n)planBox.c.open=false}
+function toggleMenu(ev){ev.stopPropagation();var m=document.getElementById('menu');m.style.display=m.style.display=='block'?'none':'block'}
+function mnu(a){document.getElementById('menu').style.display='none';if(a=='conf')openConf();else if(a=='files')openFiles();else act(a)}
+document.addEventListener('click',function(){var m=document.getElementById('menu');if(m)m.style.display='none'});
+var NOISE=/(HTTP\s?\d{3}|\b429\b|rate.?limit|bheed|aaram|ruk ke dobara|org_\w+|cooldown)/i,PROV=/^(JAAT|GEM\d?|GROQ|DS|NV2|DAI)\b/;
+function noisy(e){var x=e.text||'';return (e.t=='note'&&NOISE.test(x))||(e.t=='err'&&PROV.test(x)&&NOISE.test(x))}
+function cleanStep(s){var V={EDIT:'Badlo',WRITE:'Banao',WRITEB64:'Banao',VERIFY:'Jaanch',RUN:'Chalao',READ:'Padho',CHECK:'Jaanch'};
+ return String(s).replace(/^@@(\w+)\s*/,function(m,c){return (V[c]||c)+': '}).replace(/\s*\u2192\s*/g,' \u2014 ')}
+function stopNow(){var b=document.getElementById('send');b.classList.add('busy');toast('Ruk raha hoon...');var n=0;
+ (function go(){post('/stop').catch(function(){});if(++n<5&&running)setTimeout(go,1500)})()}
 function render(e){
+ if(noisy(e))return;
  var h=document.getElementById('hint');if(h)h.style.display='none';
  if(e.t!='review'&&!(e.t=='note'&&INNER.test(e.text||'')))chk=null;
  if(e.t=='user')chat.appendChild(el('div','msg user',e.text));
@@ -5243,7 +5303,7 @@ function render(e){
  else if(e.t=='plan'){var c=el('details','step plan');c.open=true;var sm=el('summary',null,'');c.appendChild(sm);
   var pb=el('div','pb'),bar=el('div','pbar');bar.appendChild(el('i'));pb.appendChild(bar);c.appendChild(pb);
   planBox={c:c,sum:sm,bar:bar.firstChild,items:[]};
-  e.items.forEach(function(x){var d=el('div','it');c.appendChild(d);planBox.items.push({t:x,d:d,ok:false})});
+  e.items.forEach(function(x){var d=el('div','it');c.appendChild(d);planBox.items.push({t:cleanStep(x),d:d,ok:false})});
   chat.appendChild(c);drawPlan()}
  else if(e.t=='check'){if(planBox&&planBox.items[e.n-1]){planBox.items[e.n-1].ok=true;drawPlan()}}
  else if(e.t=='review')inner((e.ok?'✅ ':'🐞 ')+e.title+(e.prov?' ('+e.prov+')':'')+'\n'+e.text,!e.ok);
@@ -5269,7 +5329,7 @@ function poll(){if(polling)return;polling=true;
   running=j.running;var b=document.getElementById('bar');
   b.style.display=running?'flex':'none';
   var W={READ:'Padh raha hoon',WRITE:'Likh raha hoon',WRITEB64:'Likh raha hoon',EDIT:'Badal raha hoon',RUN:'Chala ke dekh raha hoon',BG:'Background me chala raha hoon',VERIFY:'Jaanch raha hoon',GREP:'Dhundh raha hoon',TREE:'Files dekh raha hoon',WEB:'Web padh raha hoon',SEARCH:'Search kar raha hoon',UNZIP:'Khol raha hoon',LOOK:'PDF dekh raha hoon'};
-  document.getElementById('bt').textContent=(W[lastKind]||'Soch raha hoon')+'… '+(j.plan_n?'plan '+j.plan_done+'/'+j.plan_n+' · ':'')+'kadam '+j.step+'/'+j.max+(j.prov?' · '+j.prov:'');
+  document.getElementById('bt').textContent=(W[lastKind]||'Soch raha hoon')+'… '+(j.plan_n?'('+j.plan_done+'/'+j.plan_n+')':'');
   sendIcon();document.getElementById('t').placeholder=j.asking?'Jawab likho...':(running?'Beech me message bhejo (queue hoga)...':'Kaam likho...');
   document.getElementById('ttl').innerHTML='';var tt=document.getElementById('ttl');tt.appendChild(document.createTextNode('📂 '+j.proj+' '));tt.appendChild(el('i',null,'▾'));if(j.mode)tt.appendChild(el('span','badge '+j.mode,j.mode));
   if(near&&j.events.length)chat.scrollTop=chat.scrollHeight
@@ -5278,9 +5338,9 @@ setInterval(poll,1000);poll();
 function post(p,b){return fetch(p,{method:'POST',body:JSON.stringify(b||{})})}
 function act(p){post(p).then(poll)}
 function act2(p,b){return post(p,b).then(function(r){if(!r.ok)return r.text().then(function(t){alert(t)})}).catch(function(e){alert('Server se baat nahi hui: '+e.message)})}
-function sendIcon(){var v=document.getElementById('t').value.trim();document.getElementById('send').textContent=(running&&!v)?'⏹':'➤'}
+function sendIcon(){var v=document.getElementById('t').value.trim();var sb=document.getElementById('send'),st=running&&!v;sb.textContent=st?'\u25A0':'\u27A4';sb.classList.toggle('stop',st);if(!running)sb.classList.remove('busy')}
 function sendBtn(){var t=document.getElementById('t'),v=t.value.trim();
- if(running&&!v){post('/stop');return}
+ if(running&&!v){stopNow();return}
  if(sending||!v)return;
  sending=true;running=true;
  t.value='';t.style.height='auto';
@@ -5509,6 +5569,7 @@ class H(BaseHTTPRequestHandler):
         if p == "/stop":
             STATE["cancel"] = True
             kill_proc()
+            ev("note", text="Ruk raha hoon...")
         elif p == "/undo":
             _m = do_undo()
             if not _m.startswith("⏳") or busy_note_ok():
@@ -5737,6 +5798,509 @@ def setup():
     os.chmod(path + ".tmp", 0o600)
     os.replace(path + ".tmp", path)
     print("OpenCode config likh di:", path)
+
+
+# ================= 22.py: naya flow =================
+# task -> 2 AI samjhein (Groq, DS; Gemini backup) -> user se sawal -> level 1-10 -> 3 AI plan -> Gemini merge -> kami jaanch
+# -> Gemini shuru ke kadam banaye, aage JAAT/Groq/DS -> har file poori hone par 4 AI scan (Gemini sirf 2 baar)
+# -> Groq har file ka chhota memory card MEMORY.md me rakhe -> aakhir me mismatch jaanch
+CODE_FLOW = _env("CODE_FLOW", "1") != "0"        # 0 = purana flow
+SCAN_ON_CHECK = True                             # code/android me review har @@EDIT par nahi, file poori hone par (@@CHECK / @@DONE)
+EXAM_PREF = ("GROQ", "DS", "GEM", "GEM2", "GEM3")   # task dekhne wale (pehle 2 jo jawab dein)
+PLANNER_PREF = ("JAAT", "GROQ", "DS", "NV2", "DAI")   # plan banane wale 3
+MERGER_PREF = ("GEM", "GEM2", "GEM3", "JAAT")       # plan jodne wala: Gemini
+SCAN_PREF = ("JAAT", "GROQ")                        # poori file wale scanner (2): JAAT, Groq. DS alag (bade prompt par tukdon me). NV2/DAI sirf tab jab DS bhi na ho
+SCAN_BACKUP = ("NV2", "DAI")
+DS_PARTS_MAX = 6                                      # DS badi file ke itne tukde tak scan karta hai
+GEM_BIG_CHARS = 4000                                # Gemini sirf badi file par (ya aakhri @@DONE scan me)
+QUICK_MIN_LINES, QUICK_MAX = 40, 8                 # bade @@WRITE/@@EDIT par halka Groq scan (salah ki tarah, @@CHECK nahi rokta)
+GEM_PREF = ("GEM", "GEM2", "GEM3")
+GEM_SCAN_MAX = 2                                    # Gemini ek kaam me bug-scan me sirf itni baar
+GEM_BUILD_STEPS = 3                                 # shuru ke itne kadam Gemini banaye, phir JAAT/Groq/DS
+PLAN_GAP_ROUNDS = 2
+MEMO_FILE = "MEMORY.md"
+CODE_WRITE_PREF = ("JAAT", "GROQ", "DS")
+CODE_PLAN_PREF = ("GEM", "GEM2", "GEM3", "JAAT")
+# level -> (lines kam se kam, lines zyada se zyada, files)
+LEVEL_SCOPE = {1: (50, 100, 1), 2: (100, 200, 1), 3: (200, 400, 2), 4: (400, 700, 3), 5: (700, 1000, 4),
+               6: (1000, 1500, 5), 7: (1500, 2500, 7), 8: (2500, 4000, 9), 9: (4000, 6000, 12), 10: (6000, 10000, 15)}
+
+
+def pick_slots(prefs, n, size=0):
+    """[(naam, model)] - jo provider abhi chalu aur cooldown me nahi, prefs ke order me. size diya to DS jaise chhote-limit wale bade prompt par chhod do."""
+    out, now = [], time.time()
+    for nm in prefs:
+        if size and nm in APIS and not fits(nm, size):
+            continue
+        if nm in APIS and ready(nm) and COOL.get(nm, 0) <= now:
+            ms = models_of(APIS[nm])
+            if ms and (nm, ms[0]) not in out:
+                out.append((nm, ms[0]))
+        if len(out) >= n:
+            break
+    return out
+
+
+def fits(nm, size):
+    """Chhote plain proxy (DS) par bada prompt mat bhejo."""
+    cfg = APIS[nm]
+    if cfg["type"] == "oai":
+        return True
+    ok = size <= cfg.get("max_chars", 3000)
+    if cfg["type"] == "proxy_get":
+        ok = ok and size * 1.4 <= cfg.get("max_url", 6000)          # URL me %20/%0A se ~1.4 guna bada
+    return ok
+
+
+def par_calls(slots, system, user):
+    """Alag-alag provider par ek saath: [text ya None]."""
+    res = [None] * len(slots)
+
+    def work(i):
+        try:
+            res[i] = call_slot(slots[i][0], slots[i][1], system, user)
+        except Exception as e:
+            log("par_calls %s: %s" % (slots[i][0], e))
+    ths = [threading.Thread(target=work, args=(i,), daemon=True) for i in range(len(slots))]
+    for t in ths:
+        t.start()
+    for t in ths:
+        t.join()
+    return res
+
+
+# ---------- 1) task ko 2 AI dekhein ----------
+EXAM_SYS = ("You examine ONE task from a user of a phone coding/document assistant. Reply ONLY JSON, no prose: "
+            '{"type":"light|code|android|chat","goal":"one line","level":5,"done":["3-6 finish conditions"],'
+            '"questions":[{"q":"short question","options":["a","b","c"]}]}. '
+            "type: android = Android app/APK; code = app, bot, website, script, tool; light = document/PDF/notes/writing/small edit/sending a message; "
+            "chat = just talking or a simple question (then done=[]). "
+            "level = size and difficulty from 1 to 10 (1 = tiny single file of 50-100 lines, 3 = 200-400 lines, 5 = 700-1000 lines over 4 files, "
+            "8 = 2500-4000 lines, 10 = very large 6000+ lines). Light and chat tasks are level 1. "
+            "Each done item must be checkable by reading a file or running a command. "
+            "questions: ONLY for code/android, max 3, ONLY choices the user did NOT already state: programming language or framework, "
+            "how it will be built or run (for example GitHub Actions APK build, Termux, Docker), and one key feature or UI choice. "
+            "2-4 short options each. For light/chat tasks questions=[]. Write in the user's language style (Hinglish ok).")
+TYPE_RANK = {"android": 3, "code": 2, "light": 1, "chat": 0}
+
+
+def examine_task(task):
+    """(dict, [providers]) ya None. 2 AI ke jawab jode: type, level, goal, done, questions."""
+    user = "TASK:\n%s\n\nFILES: %s" % (task[:1500], ", ".join(list_files(40)) or "(none)")
+    got = []
+    for nm, m in pick_slots(EXAM_PREF, 6):
+        if STATE["cancel"] or len(got) >= 2:
+            break
+        t = call_slot(nm, m, EXAM_SYS, user)
+        d = parse_json_reply(t) if t else None
+        if isinstance(d, dict) and str(d.get("type", "")).strip().lower() in TYPE_RANK:
+            got.append((nm, d))
+    if not got:
+        return None
+    types = [str(d["type"]).strip().lower() for _, d in got]
+    typ = types[0]
+    if len(set(types)) > 1:                      # dono alag bole: shabdon wala andaza jo mile wahi
+        tb = classify_task(task)
+        typ = tb if tb in types else max(types, key=lambda x: TYPE_RANK[x])
+    if typ == "code" and ANDROID_TASK_RE.search(task):
+        typ = "android"
+    lv = []
+    for _, d in got:
+        try:
+            lv.append(max(1, min(10, int(round(float(d.get("level", 5)))))))
+        except (TypeError, ValueError):
+            pass
+    level = int(round(sum(lv) / len(lv))) if lv else 5
+    goal = next((clip(str(d.get("goal", "")).strip(), 220) for _, d in got if str(d.get("goal", "")).strip()), "")
+    done = next(([clip(str(x).strip(), 160) for x in d.get("done") if str(x).strip()][:6] for _, d in got if isinstance(d.get("done"), list) and d.get("done")), [])
+    qs, seen = [], set()
+    for _, d in got:
+        for q in (d.get("questions") or []):
+            if isinstance(q, dict) and str(q.get("q", "")).strip():
+                key = re.sub(r"\W+", " ", str(q["q"]).lower()).strip()[:40]
+                if key not in seen:
+                    seen.add(key)
+                    qs.append({"q": clip(str(q["q"]).strip(), 200), "options": [clip(str(o), 60) for o in (q.get("options") or [])][:4]})
+    return {"type": typ, "goal": goal, "level": level, "done": done, "questions": qs[:3]}, [n for n, _ in got]
+
+
+# ---------- 2) 3 AI plan, Gemini jode, kami jaanch ----------
+PLAN_SYS = ("You plan ONE software task as a senior engineer. Reply ONLY JSON, no prose: "
+            '{"files":[{"path":"main.py","purpose":"what it does"}],"ui":["screens/pages/sections or CLI commands"],'
+            '"advanced":["optional extra features, only if level is 4 or more"],'
+            '"steps":["ordered build steps, ONE file or ONE feature per step, last step = verification (compile/@@VERIFY)"],'
+            '"spec":["3-12 testable behaviours incl. empty or invalid input and error cases"]}. '
+            "Size must match LEVEL (given lines and files): do not over-build small tasks, do not under-build big ones. "
+            "Respect the user's answers. For an Android app step 1 is '@@TEMPLATE android <package> <AppName>' and the build is on GitHub Actions. "
+            "Write short plain lines (Hinglish ok).")
+MERGE_PLAN_SYS = ("You get several plans (JSON) for the SAME task. Merge them into ONE best plan: keep the useful union of files, UI, "
+                  "advanced features, steps and spec lines, drop duplicates, keep the size right for LEVEL. Reply ONLY JSON with the same schema "
+                  "{files,ui,advanced,steps,spec}.")
+GAP_SYS = ("You check a PLAN against the TASK. List what is still MISSING for a real user to get a working result (files, screens, "
+           "error cases, config, build step). Reply ONLY JSON: {\"missing\":[\"...\"]}. Use [] if nothing important is missing.")
+FIX_PLAN_SYS = ("You get a PLAN (JSON) and a MISSING list. Return the improved full plan as ONLY JSON with the same schema "
+                "{files,ui,advanced,steps,spec}, with every missing item added.")
+
+
+def _plan_ok(d):
+    return isinstance(d, dict) and isinstance(d.get("steps"), list) and len([x for x in d["steps"] if str(x).strip()]) >= 2
+
+
+def plan_pipeline(task, goal, level, typ):
+    """Plan banata hai, STATE/SPEC/PROJECT.md me rakhta hai. Text lautata hai jo AI ke pehle message me judta hai ('' = nahi bana)."""
+    lo, hi, nf = LEVEL_SCOPE[level]
+    user = "TASK:\n%s\n\nGOAL: %s\nTYPE: %s\nLEVEL: %d/10 (about %d-%d lines, about %d files)\nEXISTING FILES: %s" % (
+        task[:2000], goal, typ, level, lo, hi, nf, ", ".join(list_files(40)) or "(none)")
+    slots = pick_slots(PLANNER_PREF, 3, len(user) + len(PLAN_SYS))
+    if not slots:
+        return ""
+    ev("note", text="🗳 plan: %s mil ke bana rahe hain (level %d/10)..." % (" + ".join(n for n, _ in slots), level))
+    plans = []
+    for (nm, _), t in zip(slots, par_calls(slots, PLAN_SYS, user)):
+        d = parse_json_reply(t) if t else None
+        if _plan_ok(d):
+            plans.append((nm, d))
+    if STATE["cancel"] or not plans:
+        return ""
+    plan = plans[0][1]
+    mg = pick_slots(MERGER_PREF, 1)
+    if len(plans) > 1 and mg:
+        blob = "\n\n".join("PLAN %d (%s):\n%s" % (i + 1, n, json.dumps(d, ensure_ascii=False)[:4000]) for i, (n, d) in enumerate(plans))
+        t = call_slot(mg[0][0], mg[0][1], MERGE_PLAN_SYS, user + "\n\n" + blob)
+        d = parse_json_reply(t) if t else None
+        if _plan_ok(d):
+            plan = d
+            ev("note", text="🧩 %s ne %d plan jod ke ek kiya" % (mg[0][0], len(plans)))
+    for rnd in range(PLAN_GAP_ROUNDS):                   # kuch bacha to nahi?
+        if STATE["cancel"]:
+            break
+        ck = pick_slots(("GROQ", "DS", "JAAT"), 3)
+        ck = [(n, m) for n, m in ck if fits(n, 6000)][:1]
+        if not ck:
+            break
+        t = call_slot(ck[0][0], ck[0][1], GAP_SYS, user + "\n\nPLAN:\n" + json.dumps(plan, ensure_ascii=False)[:5000])
+        d = parse_json_reply(t) if t else None
+        miss = [clip(str(x), 160) for x in ((d or {}).get("missing") or [])][:8] if isinstance(d, dict) else []
+        if not miss:
+            break
+        ev("note", text="🔎 plan me ye chhoota tha (%s): %s" % (ck[0][0], " ; ".join(miss)))
+        fx = pick_slots(("JAAT", "GROQ"), 2)
+        fx = [(n, m) for n, m in fx if fits(n, 9000)][:1]
+        if not fx:
+            break
+        t = call_slot(fx[0][0], fx[0][1], FIX_PLAN_SYS, user + "\n\nPLAN:\n" + json.dumps(plan, ensure_ascii=False)[:5000] + "\n\nMISSING:\n- " + "\n- ".join(miss))
+        d = parse_json_reply(t) if t else None
+        if _plan_ok(d):
+            plan = d
+    items = [x for x in (clean_plan_item(str(l)) for l in plan.get("steps") or []) if x][:25]
+    spec = [clip(str(x).strip(), 300) for x in (plan.get("spec") or []) if len(str(x).strip()) >= 8][:25]
+    if len(items) < 2:
+        return ""
+    if len(spec) >= 3:
+        save_spec(spec)
+    STATE.update(plan_items=items, plan_ck=[])
+    ev("plan", items=items)
+    plan_pm(items, STATE["task"])
+    files = [(str(f.get("path", "")).strip(), str(f.get("purpose", "")).strip()) for f in (plan.get("files") or []) if isinstance(f, dict) and str(f.get("path", "")).strip()][:25]
+    ui = [clip(str(x), 120) for x in (plan.get("ui") or [])][:10]
+    adv = [clip(str(x), 120) for x in (plan.get("advanced") or [])][:10]
+    try:
+        with open(os.path.join(WORK, "PROJECT.md"), "a", encoding="utf-8") as f:
+            f.write("\n## Design (level %d/10)\nFiles:\n%s\nUI:\n%s\nAdvanced:\n%s\n" % (
+                level, "\n".join("- %s: %s" % x for x in files) or "-", "\n".join("- " + x for x in ui) or "-", "\n".join("- " + x for x in adv) or "-"))
+    except OSError:
+        pass
+    STATE["strong_n"] = GEM_BUILD_STEPS
+    return ("\n[PLAN TAIYAR: %s ne plan banaya, Gemini ne jodha. Level %d/10 (kareeb %d-%d lines). FILES: %s. UI: %s. ADVANCED: %s. "
+            "PLAN aur SPEC set ho chuke hain (PROJECT.md, SPEC.md): dobara mat banao, seedha kadam 1 se kaam shuru karo.]" % (
+                ", ".join(n for n, _ in plans), level, lo, hi, "; ".join("%s (%s)" % (p, clip(w, 50)) for p, w in files) or "-",
+                "; ".join(ui) or "-", "; ".join(adv) or "-"))
+
+
+def do_understand(task):
+    """Naya: 2 AI task dekhte hain, type+level tay, user se sawal, phir 3 AI plan."""
+    if len(task.split()) < 4:
+        return ""
+    forced = MODE_FORCE_RE.match(task)
+    got = examine_task(task) if CODE_FLOW else None
+    if not got:
+        return _do_understand_orig(task)
+    ex, who = got
+    typ = forced.group(1).lower() if forced else ex["type"]
+    goal, level, done = ex["goal"], ex["level"], (ex["done"] if typ != "chat" else [])
+    if typ == "chat":
+        typ = "light"
+    if typ == "light":
+        level = 1
+    STATE["utype"], STATE["goal"], STATE["level"] = typ, goal, level
+    STATE["criteria"] = ["D%d: %s" % (i + 1, x) for i, x in enumerate(done)]
+    ev("understand", goal=("L%d/10 · " % level if typ != "light" else "") + goal, kind=typ, done=STATE["criteria"], prov=" + ".join(who))
+    samajh = "\n[SAMAJH: %s | type=%s | level=%d/10%s]" % (goal, typ, level, (" | " + " ; ".join(STATE["criteria"])) if STATE["criteria"] else "")
+    if typ not in ("code", "android"):
+        return samajh
+    extra = ""
+    if not forced:
+        ans_l = []
+        for q in ex["questions"]:
+            ans, how = ask_user(q["q"], q["options"], ctx="Task: " + task[:500])
+            if how == "stop":
+                return ""
+            ans_l.append("%s -> %s" % (q["q"], ans))
+        if ans_l:
+            extra = "\n[User ke jawab: %s]" % " | ".join(ans_l)
+            STATE["task"] = task + extra
+    plan_txt = ""
+    try:
+        plan_txt = plan_pipeline(STATE["task"], goal, level, typ)
+    except Exception as e:
+        log("plan_pipeline galti: %s\n%s" % (e, traceback.format_exc()[-400:]))
+    return extra + samajh + plan_txt
+
+
+# ---------- 3) har file poori hone par 4 AI scan ----------
+DS_SYS = ("You are a strict code reviewer. You get ONE PART of a file with line numbers (other parts are reviewed separately; ignore names "
+          "or imports that are probably defined in other parts or files). Report ONLY real bugs in this part: syntax errors, clear logic errors, "
+          "crashes, unhandled empty/invalid input. Reply ONLY a JSON array, no prose: "
+          '[{"file":"path","line":N,"spec_id":"","bug":"what is wrong","fix":"exact change"}]. Reply [] if no real bug.')
+
+
+def ds_chunks(rel, budget=5200):
+    """File ko DS ke liye chhote tukdon me (line number saath), har tukda URL-encode ke baad budget ke andar."""
+    lines = _read(rel, 60000).split("\n")
+    out, cur, cur_n, start = [], [], len(urllib.parse.quote(DS_SYS)) + 80, 1
+    for i, l in enumerate(lines, 1):
+        row = "%d| %s" % (i, l[:300])
+        n = len(urllib.parse.quote(row + "\n"))
+        if cur and cur_n + n > budget:
+            out.append((start, i - 1, "\n".join(cur)))
+            cur, cur_n, start = [], len(urllib.parse.quote(DS_SYS)) + 80, i
+        cur.append(row)
+        cur_n += n
+    if cur:
+        out.append((start, len(lines), "\n".join(cur)))
+    return out
+
+
+def ds_scan(name, model, rel):
+    """DS badi file ko chhote tukdon me padhta hai; sab ke bug ek JSON text me jodta hai (ya None)."""
+    parts = ds_chunks(rel)
+    bugs, got = [], False
+    for k, (a, b, body) in enumerate(parts[:DS_PARTS_MAX]):
+        if STATE["cancel"]:
+            break
+        t = call_slot(name, model, DS_SYS, "FILE: %s (part %d/%d, lines %d-%d)\n%s" % (rel, k + 1, len(parts), a, b, body))
+        d = _norm_bugs(parse_json_reply(t), rel) if t else None
+        if d is not None:
+            got = True
+            bugs += d
+    if len(parts) > DS_PARTS_MAX:
+        log("DS scan: %s ke %d me se pehle %d tukde dekhe" % (rel, len(parts), DS_PARTS_MAX))
+    return json.dumps(bugs) if got else None
+
+
+def scan_call(system, user, rel=""):
+    """[(text, naam)] - JAAT + Groq poori file, DS usi file ke chhote tukdon me (sab ek saath). Gemini sirf badi file par ya aakhri
+    @@DONE scan me, poore kaam me GEM_SCAN_MAX baar se zyada nahi (ek baar aakhri scan ke liye bachi rehti hai)."""
+    size = len(system) + len(user)
+    slots = pick_slots(SCAN_PREF, 2, size)
+    ds = pick_slots(("DS",), 1)
+    if len(slots) + len(ds) < 2:         # DS ki jagah NV2/DAI tabhi, jab JAAT/Groq/DS milkar 2 na bane
+        slots += pick_slots(SCAN_BACKUP, 2 - len(slots) - len(ds), size)
+    used = TRACK.get("gem_scans", 0)
+    try:
+        fsize = os.path.getsize(os.path.join(WORK, rel)) if rel else 0
+    except OSError:
+        fsize = 0
+    final = bool(TRACK.get("scan_final"))
+    gem = []
+    if used < GEM_SCAN_MAX and (final or (fsize >= GEM_BIG_CHARS and used < GEM_SCAN_MAX - 1)):
+        gem = pick_slots(GEM_PREF, 1)
+        if gem:
+            TRACK["gem_scans"] = used + 1
+    todo = slots + ds + gem
+    if not todo:
+        return dual_call(system, user)
+    ev("note", text="🔍 %s: scan %s%s" % (rel or "file", " + ".join(n for n, _ in todo), " (DS tukdon me)" if ds and not fits("DS", size) else ""))
+    res = [None] * len(todo)
+
+    def work(i):
+        nm, m = todo[i]
+        try:
+            if nm == "DS" and rel and not fits("DS", size):
+                res[i] = ds_scan(nm, m, rel)
+            else:
+                res[i] = call_slot(nm, m, system, user)
+        except Exception as e:
+            log("scan %s: %s" % (nm, e))
+    ths = [threading.Thread(target=work, args=(i,), daemon=True) for i in range(len(todo))]
+    for t in ths:
+        t.start()
+    for t in ths:
+        t.join()
+    outs = [(t, n) for (n, _), t in zip(todo, res) if t]
+    return outs or dual_call(system, user)
+
+
+def scan_dirty_files():
+    """Jo files badli hain unka scan (har file ek baar poori), clean nikli to Groq ka memory card."""
+    def _sz(r):
+        try:
+            return -os.path.getsize(os.path.join(WORK, r))
+        except OSError:
+            return 0
+    dirty = sorted(TRACK.get("dirty_files") or [], key=_sz)      # sabse badi file pehle (Gemini ka hissa use mile)
+    if not dirty:
+        return ""
+    TRACK["dirty_files"] = set()
+    for rel in dirty:
+        if STATE["cancel"]:
+            break
+        if not os.path.isfile(os.path.join(WORK, rel)):
+            continue
+        try:
+            _review_hook_orig(rel)
+        except Exception as e:
+            log("scan galti %s: %s" % (rel, e))
+            continue
+        if not TRACK["bugs"].get(rel):
+            try:
+                file_memo(rel)
+            except Exception as e:
+                log("memo galti %s: %s" % (rel, e))
+    return ""
+
+
+_review_hook_orig = review_hook
+
+
+QUICK_SYS = (REVIEW_SYS8 + " IMPORTANT: this file may be UNFINISHED (written in parts). Ignore names, imports or functions that are probably "
+             "added in later parts or in other files. Report ONLY syntax errors, clear logic errors and crashes in the code shown. Max 5 items.")
+_QUICK_SEEN = {}
+
+
+def quick_scan(rel):
+    """Bade @@WRITE/@@EDIT ke baad Groq (ya DS/JAAT) ka halka scan: sirf salah, @@CHECK ko nahi rokta, 'bahut der se bug' nahi."""
+    if TRACK.get("quick_n", 0) >= QUICK_MAX:
+        return ""
+    txt = _read(rel, 60000)
+    if txt.count("\n") < QUICK_MIN_LINES or _QUICK_SEEN.get(rel) == len(txt):
+        return ""
+    user = "SPEC:\n%s\n\n%s\n\nFILE: %s\n%s" % ("\n".join(TRACK["spec"]) or "(none)", all_files_line(), rel, _numbered(txt))
+    sl = pick_slots(("GROQ", "DS", "JAAT"), 1, len(QUICK_SYS) + len(user))
+    if not sl:
+        return ""
+    TRACK["quick_n"] = TRACK.get("quick_n", 0) + 1
+    _QUICK_SEEN[rel] = len(txt)
+    t = call_slot(sl[0][0], sl[0][1], QUICK_SYS + FILES_NOTE, user)
+    bugs = _norm_bugs(parse_json_reply(t), rel) if t else None
+    bugs = drop_phantom(bugs or [])[:5]
+    if not bugs:
+        return ""
+    show_review(rel, False, "halka scan (%s): %d shak\n%s" % (sl[0][0], len(bugs), bug_text({rel: bugs})), sl[0][0])
+    return ("[HALKA-SCAN %s] %s ne ye shak dikhaye (sirf salah, file adhoori ho to ignore; poora scan @@CHECK par hoga):\n%s"
+            % (rel, sl[0][0], bug_text({rel: bugs})))
+
+
+def review_hook(rel, writer=None):
+    if CODE_FLOW and SCAN_ON_CHECK and cur_mode() in ("code", "android") and rel.lower().endswith(REVIEW_EXT):
+        TRACK.setdefault("dirty_files", set()).add(rel)
+        try:
+            return quick_scan(rel)
+        except Exception as e:
+            log("quick_scan galti: %s" % e)
+            return ""
+    return _review_hook_orig(rel, writer)
+
+
+# ---------- 4) memory file: har file me kya hai ----------
+MEMO_SYS = ("You write a SHORT memory card for ONE source file so other files can be checked against it. Plain text, max 6 lines: "
+            "line 1 = what the file is for; then its public names with signatures (functions, classes, routes, ids, exports, resource names); "
+            "last line 'needs:' = what it imports or uses from OTHER project files, config or env. No code block, no prose.")
+
+
+def memory_load():
+    cards, cur = {}, None
+    try:
+        with open(os.path.join(WORK, MEMO_FILE), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("## "):
+                    cur = line[3:].strip()
+                    cards[cur] = []
+                elif cur is not None and line.strip():
+                    cards[cur].append(line.rstrip())
+    except OSError:
+        pass
+    return {k: "\n".join(v) for k, v in cards.items()}
+
+
+def memory_text(limit=3000):
+    cards = {k: v for k, v in memory_load().items() if os.path.isfile(os.path.join(WORK, k))}
+    return clip("\n".join("## %s\n%s" % (k, v) for k, v in cards.items()), limit) if cards else ""
+
+
+def file_memo(rel):
+    txt = _read(rel, 12000)
+    if not txt.strip():
+        return
+    user = "FILE: %s\n%s" % (rel, txt[:9000])
+    card = ""
+    for nm, m in pick_slots(("GROQ", "DS", "JAAT"), 3):
+        if not fits(nm, len(MEMO_SYS) + len(user)):
+            continue
+        t = call_slot(nm, m, MEMO_SYS, user)
+        if t and t.strip():
+            card = re.sub(r"```\w*", "", clean_reply(t)).strip()
+            break
+    if not card:
+        return
+    cards = memory_load()
+    cards[rel] = clip(card, 700)
+    body = "# MEMORY (har file me kya hai; Groq likhta hai; @@DONE par cross-file mismatch jaanchne ke liye)\n\n" + "\n\n".join(
+        "## %s\n%s" % (k, v) for k, v in cards.items() if os.path.isfile(os.path.join(WORK, k))) + "\n"
+    with open(os.path.join(WORK, MEMO_FILE), "w", encoding="utf-8") as f:
+        f.write(body)
+    ev("note", text="🧠 %s ka memory card likha (Groq)" % rel)
+
+
+_context_block_orig = context_block
+
+
+def context_block():
+    base = _context_block_orig()
+    try:
+        mem = memory_text(2500)
+        if mem:
+            base += "\nFILE MEMORY (har file me kya hai, naya code isi se milao):\n" + mem
+    except Exception as e:
+        log("memory block galti: %s" % e)
+    return base
+
+
+_final_payload_orig = _final_payload
+
+
+def _final_payload(name):
+    p = _final_payload_orig(name)
+    mem = memory_text(4000)
+    return p + ("\n\nMEMORY MAP (har file me kya hai; import/naam/signature/id/route ka mismatch jaancho):\n" + mem if mem else "")
+
+
+FINAL_SYS = FINAL_SYS + " If a MEMORY MAP is given, also report any cross-file mismatch (wrong import, name, signature, resource id, route) as a bug."
+
+_done_gate_orig = done_gate
+
+
+def done_gate():
+    if CODE_FLOW and SCAN_ON_CHECK:
+        TRACK["scan_final"] = True
+        try:
+            scan_dirty_files()
+        finally:
+            TRACK["scan_final"] = False
+        openb = {f: b for f, b in TRACK["bugs"].items() if b}
+        if openb:
+            return "DONE mana: reviewer ke bug khule hain, pehle inhe theek karo:\n" + bug_text(openb)
+    return _done_gate_orig()
 
 
 if __name__ == "__main__":
