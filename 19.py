@@ -41,6 +41,7 @@ APIS = {
         "timeout": 240,            # 4 min (beech ka server isse pehle hi timeout de deta tha)
         "total_timeout": 240,
         "group": "jaat",
+        "no_system": True,         # JAAT 'System message must be at the beginning' 400 deta tha: system ko user message me jod do
         "max_conc": 1,
         "min_gap": 1,
         "rate_cool": 15,           # 429 ke baad sirf 15 sec aaram (lock nahi)
@@ -340,7 +341,7 @@ CONF_FILE = os.path.join(ROOT, ".mumbai", "providers.json")  # bina rebuild ke p
 _CONF_MT = [0.0]
 CONF_VER = 19              # purani providers.json ka priority (JAAT pehle, DSX last) naye order ko na bigaade
 CONF_KEYS = ("type", "base", "key", "models", "timeout", "total_timeout", "max_chars", "max_url", "max_ctx",
-             "max_tokens", "vision", "group", "max_conc", "min_gap", "rate_cool", "retry_429")
+             "max_tokens", "vision", "group", "max_conc", "min_gap", "rate_cool", "retry_429", "no_system")
 
 
 def group_of(name):
@@ -675,8 +676,27 @@ def sse(text):
     return (ch({"role": "assistant", "content": text}, None) + ch({}, "stop") + "data: [DONE]\n\n").encode()
 
 
+def fold_system(msgs):
+    """system message ko pehle user message ke andar jod deta hai (kuch server 'System message must be at the beginning' 400 dete hain)."""
+    sys_t = "\n\n".join(str(m.get("content") or "") for m in msgs if m.get("role") == "system")
+    rest = [dict(m) for m in msgs if m.get("role") != "system"]
+    if not sys_t:
+        return rest
+    for m in rest:
+        if m.get("role") == "user":
+            c = m.get("content")
+            if isinstance(c, list):
+                m["content"] = [{"type": "text", "text": sys_t + "\n\n"}] + c
+            else:
+                m["content"] = sys_t + "\n\n" + str(c or "")
+            return rest
+    return [{"role": "user", "content": sys_t}] + rest
+
+
 def upstream(cfg, model, body, timeout=None):
     b = dict(body)
+    if cfg.get("no_system") and b.get("messages"):
+        b["messages"] = fold_system(b["messages"])
     b["model"] = model
     req = urllib.request.Request(
         cfg["base"].rstrip("/") + "/chat/completions", json.dumps(b).encode(),
