@@ -3333,8 +3333,14 @@ def phantom(text):
     return False
 
 
+NOT_BUG_RE = re.compile(r"not a (?:real )?(?:code )?bug|no (?:real )?(?:bug|issue|problem)s?\b|nothing to fix|no change (?:is )?(?:needed|required)|"
+                        r"verify .{0,60}(?:dashboard|deploy)|cross-file:? no issue|looks (?:good|correct|fine)", re.I)
+
+
 def drop_phantom(bugs):
-    return [b for b in (bugs or []) if not phantom("%s %s" % (b.get("bug", ""), b.get("fix", "")))]
+    return [b for b in (bugs or [])
+            if not phantom("%s %s" % (b.get("bug", ""), b.get("fix", "")))
+            and not NOT_BUG_RE.search("%s %s" % (b.get("bug", ""), b.get("fix", "")))]
 
 
 def _final_payload(name):
@@ -4535,7 +4541,7 @@ def run_agent(task):
 
 
 # ================= 21.py: samajh, done-criteria, naya raasta, user se poochna, seekha, PDF dekhna =================
-ASK_WAIT = float(_env("ASK_WAIT", "600"))           # user ke jawab ka intezaar (second, 10 min). Na aaye to 3 AI faisla karte hain
+ASK_WAIT = float(_env("ASK_WAIT", "30"))           # user ke jawab ka intezaar (second, 10 min). Na aaye to 3 AI faisla karte hain
 CRIT_REJECT_MAX, ESC_AT, ESC_MAX = 2, 4, 2          # criteria 2 baar mana; aakhri review 4 baar mana -> user se poochho; ek kaam me max 2 baar
 SPLIT_ROLES = _env("SPLIT_ROLES", "1") != "0"       # plan/review mazboot model se, likhna sasta/tez model se (0 = band)
 TIER = {"JAAT": "strong", "NV2": "strong", "GEM": "strong", "GEM2": "strong", "GEM3": "strong", "DSX": "strong",
@@ -5941,6 +5947,7 @@ EXAM_SYS = ("You examine ONE task from a user of a phone coding/document assista
             "chat = just talking or a simple question (then done=[]). "
             "level = size and difficulty from 1 to 10 (1 = tiny single file of 50-100 lines, 3 = 200-400 lines, 5 = 700-1000 lines over 4 files, "
             "8 = 2500-4000 lines, 10 = very large 6000+ lines). Light and chat tasks are level 1. "
+            "A simple single-purpose bot, worker, script or small tool is level 2 or 3 (only a big multi-screen app is 4 or more). "
             "Each done item must be checkable by reading a file or running a command. "
             "questions: ONLY for code/android, max 3, ONLY choices the user did NOT already state: programming language or framework, "
             "how it will be built or run (for example GitHub Actions APK build, Termux, Docker), and one key feature or UI choice. "
@@ -6034,7 +6041,7 @@ PLAN_SYS = ("You plan ONE software task as a senior engineer. Reply ONLY JSON, n
             '"spec":["3-12 testable behaviours incl. empty or invalid input and error cases"]}. '
             "Size must match LEVEL (given lines and files): do not over-build small tasks, do not under-build big ones. "
             "Build ONLY what the TASK and the BRIEF ask for. Do NOT add deployment or hosting config, webhooks, CI, docs or other extras "
-            "unless the task names them. Keep steps minimal. "
+            "unless the task names them. Keep steps minimal. If the TASK says how many files to make, use exactly that many. "
             "Respect the user's answers. For an Android app step 1 is '@@TEMPLATE android <package> <AppName>' and the build is on GitHub Actions. "
             "Write short plain lines (Hinglish ok).")
 MERGE_PLAN_SYS = ("You get several plans (JSON) for the SAME task. Merge them into ONE best plan: keep the SMALLEST set of files, UI, "
@@ -6162,9 +6169,9 @@ def do_understand(task):
     if typ not in ("code", "android"):
         return samajh
     extra = ""
-    if not forced:
+    if not forced and not project_has_files():
         ans_l = []
-        for q in ex["questions"][: (1 if level <= 3 else 3)]:
+        for q in ex["questions"][:1]:
             ans, how = ask_user(q["q"], q["options"], ctx="Task: " + task[:500])
             if how == "stop":
                 return ""
