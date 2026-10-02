@@ -3,6 +3,8 @@
 
 Environment variables (blitz me daalo):
   JAAT_KEY  GEM_KEY  DS_KEY  GROQ_KEY  NV2_KEY  DAI_KEY     AI ki keys (jo key nahi di wo AI band rahega)
+  NTFY_TOPIC        (optional) ntfy app ka topic, ya TG_TOKEN + TG_CHAT (Telegram): kaam khatam hone par phone par message
+  BRAVE_KEY         (optional) @@SEARCH ke liye Brave Search; na do to DuckDuckGo se chalta hai
   MUMBAI_PASSWORD   (optional) login password, na do to 8888
   PORT              blitz khud deta hai (na ho to 8011)
   DATA_DIR          (optional) projects ka folder, default ~/mumbai_work
@@ -12,6 +14,7 @@ Login: 50 galat try par 1 din ke liye lock. /health bina password ke 'ok' deta h
 Termux par bhi chalta hai:  python 19.py  ->  http://127.0.0.1:8011"""
 import base64, difflib, io, json, os, re, shlex, shutil, signal, subprocess, sys
 import contextlib, copy, threading, time, traceback, zipfile
+import gzip, html.parser, ipaddress, socket, struct, tarfile, zlib
 import urllib.error, urllib.parse, urllib.request
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -141,7 +144,7 @@ DEFAULT_PRIORITY = list(PRIORITY)
 VERSION = "4.9"
 PORT = int(os.environ.get("PORT") or 8011)
 BIND = os.environ.get("BIND") or "0.0.0.0"
-MAX_STEPS = 150           # ek kaam me itne kadam
+MAX_STEPS = 1000          # ek kaam me itne kadam
 REPEAT_WAIT, REPEAT_WAITS = 15 * 60, 3   # atakne par 15 min ruko (max 3 baar), phir wahin se chalo
 REPEAT_MAX = 15           # lagatar wahi command itni baar aaye tab kaam rokna (beech me har 3 baar par AI badalta hai)
 MAX_TOKENS = 8000         # AI ke jawab ki lambai (APIS me (19.py ke upar) cfg["max_tokens"] se badal sakte ho)
@@ -232,8 +235,8 @@ Kaam ho to in commands se karo. Har command nayi line par sirf @@NAAM se shuru h
 @@VERIFY                 project ki jaanch: syntax, XML, gradle, Android resources/manifest. Galtiyan list karta hai
 @@GREP <text>            saari files me text dhundho
 @@LS <folder>            ek folder ki list
-@@READ <file> [a-b]      file padho (badi file ho to line range, jaise: @@READ app.py 100-220)
-@@WRITE <file>           NAYI file, poora content, aakhir me @@END alag line par
+@@READ <file> [a-b]      file padho (badi file ho to line range, jaise: @@READ app.py 100-220). zip, tar/gz, docx, xlsx, pptx, pdf aur image (size) bhi padh leta hai\n@@UNZIP <file> [folder]  zip / tar / tgz / gz kholo\n@@SEARCH <sawal>         internet search (top 8 natije: title, link, saar). Phir kaam ka link @@WEB se padho\n@@NOTIFY <message>     user ke phone par message (kaam bahut lamba ho ya user ki zaroorat ho tab)\n@@WEB <https link>       web page ka text padho (sirf padhna; local/private address band). Library ka naya version ya docs dekhne ko
+@@WRITE <file>           NAYI file, poora content, aakhir me @@END alag line par. Naam .pdf / .docx / .xlsx ho to asli file banti hai: body me "# bada heading", "## chhota heading", "- bullet", baaki paragraph (xlsx me har line ek row, comma se alag, "=SUM(A1:A3)" jaisa formula bhi chalta hai)
 @@EDIT <file>            purani file me badlav, neeche wale format me, aakhir me @@END
 @@WRITEB64 <file>        binary file (chhoti image wagairah), body base64, aakhir me @@END
 @@RUN <shell command>    command chalao (2 minute tak, input nahi milta, isliye -y / --yes / -q jaise flags do)
@@ -984,8 +987,594 @@ def ask(msgs):
     return None
 
 
+# ================= FORMATS: har type ki file padho/banao (sirf stdlib; pypdf ho to PDF padhne me wo bhi) =================
+CONVERT_EXT = (".zip", ".docx", ".pptx", ".xlsx", ".pdf", ".tar", ".tgz", ".gz", ".png", ".jpg", ".jpeg", ".gif", ".odt")
+MAKE_EXT = (".pdf", ".docx", ".xlsx")
+FMT_MAX = 12000
+
+
+def _xml_text(node):
+    out = []
+    for el in node.iter():
+        t = el.tag.rsplit("}", 1)[-1]
+        if t == "t" and el.text:
+            out.append(el.text)
+        elif t in ("tab",):
+            out.append("\t")
+        elif t in ("br", "cr"):
+            out.append("\n")
+    return "".join(out)
+
+
+def _paras(xml_bytes):
+    root = ET.fromstring(xml_bytes)
+    lines = []
+    for el in root.iter():
+        if el.tag.rsplit("}", 1)[-1] in ("p",):
+            lines.append(_xml_text(el))
+    return lines
+
+
+def _read_docx(z):
+    names = ["word/document.xml"] + sorted(n for n in z.namelist() if re.match(r"word/(header|footer)\d*\.xml$", n))
+    out = []
+    for n in names:
+        if n in z.namelist():
+            out += [l for l in _paras(z.read(n)) if l.strip()] if n != "word/document.xml" else _paras(z.read(n))
+    return "\n".join(out)
+
+
+def _read_pptx(z):
+    slides = sorted((n for n in z.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", n)),
+                    key=lambda n: int(re.search(r"(\d+)\.xml$", n).group(1)))
+    out = []
+    for i, n in enumerate(slides, 1):
+        out.append("--- Slide %d ---" % i)
+        out += [l for l in _paras(z.read(n)) if l.strip()]
+    return "\n".join(out) or "(koi slide text nahi mila)"
+
+
+def _col_idx(ref):
+    m = re.match(r"([A-Z]+)", ref or "")
+    n = 0
+    for ch in (m.group(1) if m else "A"):
+        n = n * 26 + ord(ch) - 64
+    return n - 1
+
+
+def _read_xlsx(z):
+    shared = []
+    if "xl/sharedStrings.xml" in z.namelist():
+        for si in ET.fromstring(z.read("xl/sharedStrings.xml")):
+            shared.append(_xml_text(si))
+    sheets = []
+    try:
+        wb = ET.fromstring(z.read("xl/workbook.xml"))
+        rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+        rmap = {r.get("Id"): r.get("Target") for r in rels}
+        for s in wb.iter():
+            if s.tag.rsplit("}", 1)[-1] == "sheet":
+                rid = [v for k, v in s.attrib.items() if k.endswith("}id")]
+                tgt = rmap.get(rid[0]) if rid else None
+                if tgt:
+                    tgt = tgt.lstrip("/")
+                    sheets.append((s.get("name"), tgt if tgt.startswith("xl/") else "xl/" + tgt))
+    except (KeyError, ET.ParseError):
+        pass
+    if not sheets:
+        sheets = [(n, n) for n in sorted(z.namelist()) if re.match(r"xl/worksheets/sheet\d+\.xml$", n)]
+    out = []
+    for name, path in sheets:
+        out.append("=== Sheet: %s ===" % name)
+        root = ET.fromstring(z.read(path))
+        rows = 0
+        for row in root.iter():
+            if row.tag.rsplit("}", 1)[-1] != "row":
+                continue
+            cells = {}
+            for c in row:
+                if c.tag.rsplit("}", 1)[-1] != "c":
+                    continue
+                t, val = c.get("t"), ""
+                v = next((x for x in c if x.tag.rsplit("}", 1)[-1] == "v"), None)
+                if t == "s" and v is not None and v.text and v.text.isdigit() and int(v.text) < len(shared):
+                    val = shared[int(v.text)]
+                elif t == "inlineStr":
+                    val = _xml_text(c)
+                elif v is not None and v.text is not None:
+                    val = v.text
+                if val == "":
+                    f = next((x for x in c if x.tag.rsplit("}", 1)[-1] == "f"), None)
+                    if f is not None and f.text:
+                        val = "=" + f.text            # formula (Excel kholne par value bharegi)
+                cells[_col_idx(c.get("r"))] = val
+            if cells:
+                out.append("\t".join(cells.get(i, "") for i in range(max(cells) + 1)))
+                rows += 1
+            if rows >= 300:
+                out.append("...(300 se zyada rows, baaki nahi dikhayi)")
+                break
+    return "\n".join(out)
+
+
+def _read_odt(z):
+    return "\n".join(_paras(z.read("content.xml")))
+
+
+def _pdf_unescape(s):
+    s = re.sub(r"\\([0-7]{1,3})", lambda m: chr(int(m.group(1), 8)), s)
+    return re.sub(r"\\(.)", lambda m: {"n": "\n", "r": "", "t": "\t"}.get(m.group(1), m.group(1)), s, flags=re.S)
+
+
+def _read_pdf(raw, path):
+    try:
+        import pypdf
+        r = pypdf.PdfReader(io.BytesIO(raw))
+        out = []
+        for i, pg in enumerate(r.pages, 1):
+            out.append("--- Page %d ---\n%s" % (i, (pg.extract_text() or "").strip()))
+        txt = "\n".join(out)
+        if txt.replace("--- Page", "").strip():
+            return txt
+    except ImportError:
+        pass
+    except Exception as e:
+        log("pypdf fail: %s" % e)
+    parts = []
+    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", raw, re.S):
+        data = m.group(1)
+        try:
+            data = zlib.decompress(data)
+        except Exception:
+            pass
+        t = data.decode("latin-1", "replace")
+        if "BT" not in t:
+            continue
+        for blk in re.findall(r"BT(.*?)ET", t, re.S):
+            line = []
+            for tj in re.finditer(r"\[(.*?)\]\s*TJ|\((.*?)(?<!\\)\)\s*(?:Tj|'|\")", blk, re.S):
+                if tj.group(1) is not None:
+                    line.append("".join(_pdf_unescape(x) for x in re.findall(r"\((.*?)(?<!\\)\)", tj.group(1), re.S)))
+                else:
+                    line.append(_pdf_unescape(tj.group(2)))
+            if line:
+                parts.append(" ".join(line))
+    if parts:
+        return "(stdlib se padha, adhura ya bigda ho sakta hai; sahi padhne ko Dockerfile me pypdf lagao)\n" + "\n".join(parts)
+    return "(PDF me text nahi mila: scan/image wali PDF ho sakti hai, ya pypdf chahiye)"
+
+
+def _img_info(raw, ext):
+    try:
+        if raw[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = struct.unpack(">II", raw[16:24])
+            return "PNG image %dx%d, %d bytes" % (w, h, len(raw))
+        if raw[:6] in (b"GIF87a", b"GIF89a"):
+            w, h = struct.unpack("<HH", raw[6:10])
+            return "GIF image %dx%d, %d bytes" % (w, h, len(raw))
+        if raw[:2] == b"\xff\xd8":
+            i = 2
+            while i < len(raw) - 9:
+                if raw[i] != 0xFF:
+                    i += 1
+                    continue
+                mk = raw[i + 1]
+                if mk in (0xC0, 0xC1, 0xC2):
+                    h, w = struct.unpack(">HH", raw[i + 5:i + 9])
+                    return "JPEG image %dx%d, %d bytes" % (w, h, len(raw))
+                i += 2 + struct.unpack(">H", raw[i + 2:i + 4])[0]
+    except Exception:
+        pass
+    return "image file, %d bytes (size nahi padh payi)" % len(raw)
+
+
+def read_any(path, raw):
+    """Binary document ko text me badalta hai. Is type ki nahi hai to None."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in CONVERT_EXT:
+        return None
+    try:
+        if ext in (".png", ".jpg", ".jpeg", ".gif"):
+            return _img_info(raw, ext) + "\n(image ka andar dekha nahi ja sakta; sirf size ki jaankari)"
+        if ext == ".pdf":
+            return _read_pdf(raw, path)
+        if ext == ".gz" and not path.lower().endswith(".tar.gz"):
+            return gzip.decompress(raw).decode("utf-8", "replace")
+        if ext in (".tar", ".tgz", ".gz"):
+            with tarfile.open(fileobj=io.BytesIO(raw)) as t:
+                ms = t.getmembers()
+                return "archive: %d entries\n%s" % (len(ms), "\n".join("%s (%d B)" % (m.name + ("/" if m.isdir() else ""), m.size) for m in ms[:300]))
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            if ext == ".docx":
+                return _read_docx(z)
+            if ext == ".pptx":
+                return _read_pptx(z)
+            if ext == ".xlsx":
+                return _read_xlsx(z)
+            if ext == ".odt":
+                return _read_odt(z)
+            infos = z.infolist()
+            return "zip: %d entries\n%s%s" % (len(infos), "\n".join("%s (%d B)" % (i.filename, i.file_size) for i in infos[:300]),
+                                              "\n...(300 se zyada)" if len(infos) > 300 else "")
+    except Exception as e:
+        return "(%s padhne me dikkat: %s)" % (ext, str(e)[:120])
+
+
+# ---------- UNZIP ----------
+def do_unzip(arg):
+    parts = arg.split()
+    if not parts:
+        return "ERROR: @@UNZIP <file> [folder]", False, False, None
+    src = safe(parts[0])
+    if not os.path.isfile(src):
+        return "ERROR: file nahi mili: %s" % parts[0], False, False, None
+    stem = re.sub(r"(\.tar\.gz|\.tgz|\.tar|\.zip|\.gz)$", "", os.path.basename(src), flags=re.I) or "out"
+    dest_rel = parts[1] if len(parts) > 1 else os.path.join(os.path.dirname(os.path.relpath(src, WORK)), stem)
+    dest = safe(dest_rel)
+    os.makedirs(dest, exist_ok=True)
+    n, total, skipped = 0, 0, 0
+
+    def put(name, data):
+        nonlocal n, total, skipped
+        t = os.path.realpath(os.path.join(dest, name))
+        if not (t == dest or t.startswith(dest + os.sep)) or os.path.isdir(t):
+            skipped += 1
+            return
+        if n >= 3000 or total + len(data) > 150 * 1024 * 1024:
+            raise ValueError("bahut bada archive (3000 files ya 150MB se zyada)")
+        os.makedirs(os.path.dirname(t), exist_ok=True)
+        snap(t)
+        with open(t, "wb") as f:
+            f.write(data)
+        n += 1
+        total += len(data)
+
+    low = src.lower()
+    if low.endswith(".zip"):
+        with zipfile.ZipFile(src) as z:
+            for i in z.infolist():
+                if not i.is_dir():
+                    if i.file_size > 100 * 1024 * 1024:
+                        skipped += 1
+                        continue
+                    put(i.filename, z.read(i))
+    elif low.endswith((".tar", ".tgz", ".tar.gz")):
+        with tarfile.open(src) as t:
+            for m in t.getmembers():
+                if m.isfile() and m.size <= 100 * 1024 * 1024:
+                    put(m.name, t.extractfile(m).read())
+                elif m.isfile():
+                    skipped += 1
+    elif low.endswith(".gz"):
+        with gzip.open(src) as g:
+            put(stem, g.read(100 * 1024 * 1024))
+    else:
+        return "ERROR: sirf .zip .tar .tgz .tar.gz .gz khulte hain", False, False, None
+    return "khola: %d files -> %s (%d bytes)%s" % (n, os.path.relpath(dest, WORK), total, (", %d chhodi (unsafe/bahut badi)" % skipped) if skipped else ""), n > 0, True, None
+
+
+# ---------- WEB (sirf padhna) ----------
+class _TextOut(html.parser.HTMLParser):
+    BLOCK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "pre", "table", "ul", "ol"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out, self.skip = [], 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "noscript", "svg", "head"):
+            self.skip += 1
+        elif tag in self.BLOCK:
+            self.out.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript", "svg", "head"):
+            self.skip = max(0, self.skip - 1)
+        elif tag in self.BLOCK:
+            self.out.append("\n")
+
+    def handle_data(self, d):
+        if not self.skip and d.strip():
+            self.out.append(d)
+
+
+def _public_host(host):
+    try:
+        for fam, _, _, _, sa in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(sa[0].split("%")[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _public_host(urllib.parse.urlparse(newurl).hostname or ""):
+            raise urllib.error.URLError("redirect private address par ja raha hai, roka")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def do_web(arg):
+    url = arg.strip().split()[0] if arg.strip() else ""
+    u = urllib.parse.urlparse(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        return "ERROR: @@WEB https://... (poora link do)", False, False, None
+    if not _public_host(u.hostname):
+        return "ERROR: ye address private/local hai, allowed nahi", False, False, None
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/html,application/json,text/plain,*/*"})
+    with urllib.request.build_opener(_SafeRedirect).open(req, timeout=25) as r:
+        ctype = r.headers.get("Content-Type", "")
+        raw = r.read(2 * 1024 * 1024)
+    if not re.search(r"text|json|xml|javascript", ctype, re.I) and b"\0" in raw[:2000]:
+        return "(%s, %d bytes: ye text nahi hai, padha nahi gaya)" % (ctype or "binary", len(raw)), False, True, None
+    text = raw.decode("utf-8", "replace")
+    if "html" in ctype.lower() or text.lstrip()[:15].lower().startswith(("<!doctype", "<html")):
+        p = _TextOut()
+        try:
+            p.feed(text)
+        except Exception:
+            pass
+        text = re.sub(r"[ \t]+", " ", "".join(p.out))
+        text = re.sub(r"\n\s*\n+", "\n", text).strip()
+    return "[%s]\n%s" % (url, clip(text, FMT_MAX) if len(text) > FMT_MAX else text), False, True, None
+
+
+# ---------- WRITE se PDF / DOCX / XLSX banana ----------
+def _blocks(text):
+    """'# heading', '## heading', '- bullet', baaki paragraph, khaali line = gap."""
+    out = []
+    for ln in text.split("\n"):
+        s = ln.rstrip()
+        if s.startswith("## "):
+            out.append(("h2", s[3:].strip()))
+        elif s.startswith("# "):
+            out.append(("h1", s[2:].strip()))
+        elif re.match(r"\s*[-*] ", s):
+            out.append(("li", re.sub(r"^\s*[-*] ", "", s)))
+        elif not s.strip():
+            out.append(("gap", ""))
+        else:
+            out.append(("p", s.strip()))
+    return out
+
+
+def make_docx(text):
+    def esc(t):
+        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    body = []
+    for k, t in _blocks(text):
+        if k == "gap":
+            body.append("<w:p/>")
+            continue
+        rpr = {"h1": '<w:rPr><w:b/><w:sz w:val="36"/></w:rPr>', "h2": '<w:rPr><w:b/><w:sz w:val="28"/></w:rPr>'}.get(k, "")
+        if k == "li":
+            t = "\u2022 " + t
+        body.append('<w:p><w:r>%s<w:t xml:space="preserve">%s</w:t></w:r></w:p>' % (rpr, esc(t)))
+    doc = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+           '<w:body>%s<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr></w:body></w:document>' % "".join(body))
+    ct = ('<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+          '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    rels = ('<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", ct)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", doc)
+    return buf.getvalue()
+
+
+def _col_name(i):
+    s = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def make_xlsx(text):
+    import csv
+    lines = [l for l in text.split("\n") if l.strip()]
+    delim = "\t" if lines and "\t" in lines[0] else ("|" if lines and "|" in lines[0] and "," not in lines[0] else ",")
+    rows = []
+    for r in csv.reader(lines, delimiter=delim):
+        rows.append([c.strip() for c in r])
+
+    def esc(t):
+        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    xr = []
+    for ri, row in enumerate(rows, 1):
+        cs = []
+        for ci, v in enumerate(row):
+            ref = "%s%d" % (_col_name(ci), ri)
+            if v == "":
+                continue
+            if v.startswith("="):
+                cs.append('<c r="%s"><f>%s</f></c>' % (ref, esc(v[1:])))
+            elif re.fullmatch(r"-?\d+(\.\d+)?", v) and not (len(v) > 1 and v.startswith("0") and not v.startswith("0.")):
+                cs.append('<c r="%s"><v>%s</v></c>' % (ref, v))
+            else:
+                cs.append('<c r="%s" t="inlineStr"><is><t xml:space="preserve">%s</t></is></c>' % (ref, esc(v)))
+        xr.append('<row r="%d">%s</row>' % (ri, "".join(cs)))
+    sheet = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>%s</sheetData></worksheet>' % "".join(xr))
+    wb = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+          'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>')
+    wrels = ('<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+             '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
+    ct = ('<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+          '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+          '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
+    rels = ('<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", ct)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("xl/workbook.xml", wb)
+        z.writestr("xl/_rels/workbook.xml.rels", wrels)
+        z.writestr("xl/worksheets/sheet1.xml", sheet)
+    return buf.getvalue()
+
+
+def make_pdf(text):
+    """Simple A4 PDF (Helvetica, latin-1 akshar). Devanagari/emoji '?' ban jate hain."""
+    W, H, M = 595, 842, 50
+    pages, cur, y = [], [], H - M
+
+    def width(s, size):
+        return len(s) * size * 0.52
+
+    def wrap(s, size, maxw):
+        words, lines, ln = s.split(" "), [], ""
+        for w in words:
+            t = (ln + " " + w).strip()
+            if width(t, size) <= maxw or not ln:
+                ln = t
+            else:
+                lines.append(ln)
+                ln = w
+        lines.append(ln)
+        return lines
+
+    def enc(s):
+        return s.encode("cp1252", "replace").decode("cp1252").encode("latin-1", "replace")
+
+    bad = [0]
+
+    def emit(font, size, x, s):
+        nonlocal y, cur
+        if y - size < M:
+            pages.append(cur)
+            cur, y = [], H - M
+        e = enc(s)
+        bad[0] += e.count(b"?") - s.count("?")
+        e = e.replace(b"\\", b"\\\\").replace(b"(", b"\\(").replace(b")", b"\\)")
+        cur.append(b"BT /%s %d Tf %d %d Td (" % (font.encode(), size, x, y - size) + e + b") Tj ET")
+        y -= int(size * 1.35)
+
+    for k, t in _blocks(text):
+        if k == "gap":
+            y -= 7
+            continue
+        font, size, x = {"h1": ("F2", 20, M), "h2": ("F2", 15, M), "li": ("F1", 11, M + 14)}.get(k, ("F1", 11, M))
+        if k in ("h1", "h2"):
+            y -= 4
+        if k == "li":
+            t = "- " + t
+        for ln in wrap(t, size, W - M - x):
+            emit(font, size, x, ln)
+    pages.append(cur)
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", None,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>"]
+    kids = []
+    for pg in pages:
+        content = b"\n".join(pg)
+        objs.append(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
+        cid = len(objs)
+        objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d %d] /Contents %d 0 R /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> >>" % (W, H, cid))
+        kids.append(b"%d 0 R" % len(objs))
+    objs[1] = b"<< /Type /Pages /Kids [" + b" ".join(kids) + b"] /Count %d >>" % len(kids)
+    out = bytearray(b"%PDF-1.4\n")
+    offs = []
+    for i, o in enumerate(objs, 1):
+        offs.append(len(out))
+        out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    for o in offs:
+        out += b"%010d 00000 n \n" % o
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    return bytes(out), bad[0]
+
+
+def make_binary(ext, text):
+    """(bytes, note). ext: .pdf/.docx/.xlsx"""
+    if ext == ".docx":
+        return make_docx(text), ""
+    if ext == ".xlsx":
+        return make_xlsx(text), ""
+    data, bad = make_pdf(text)
+    return data, (" (%d akshar '?' ban gaye: PDF me sirf English/latin akshar chalte hain)" % bad) if bad else ""
+
+# ================= SEARCH + NOTIFY =================
+def _strip_tags(t):
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", t or ""))).strip()
+
+
+def do_search(q):
+    q = q.strip()
+    if not q:
+        return "ERROR: @@SEARCH <kya dhundhna hai>", False, False, None
+    res = []
+    bk = _env("BRAVE_KEY")
+    if bk:                                   # Brave Search API (free plan), sabse bharosemand
+        req = urllib.request.Request("https://api.search.brave.com/res/v1/web/search?" + urllib.parse.urlencode({"q": q, "count": 8}),
+                                     headers={"Accept": "application/json", "X-Subscription-Token": bk, "User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=25) as r:
+            j = json.loads(r.read().decode("utf-8", "replace"))
+        for x in (j.get("web") or {}).get("results", [])[:8]:
+            res.append((_strip_tags(x.get("title")), x.get("url", ""), _strip_tags(x.get("description"))))
+    else:                                    # bina key: DuckDuckGo ka html page
+        req = urllib.request.Request("https://html.duckduckgo.com/html/", urllib.parse.urlencode({"q": q}).encode(),
+                                     {"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(req, timeout=25) as r:
+            page = r.read(1500000).decode("utf-8", "replace")
+        links = [(m.group(0), m.end()) for m in re.finditer(r"<a\b[^>]*result__a[^>]*>.*?</a>", page, re.S)]
+        for i, (a, end) in enumerate(links[:8]):
+            h = re.search(r'href="([^"]+)"', a)
+            url = html.unescape(h.group(1)) if h else ""
+            u = re.search(r"uddg=([^&]+)", url)
+            if u:
+                url = urllib.parse.unquote(u.group(1))
+            nxt = links[i + 1][1] if i + 1 < len(links) else len(page)
+            sn = re.search(r"result__snippet[^>]*>(.*?)</(?:a|td|div)>", page[end:nxt], re.S)
+            res.append((_strip_tags(a), url, _strip_tags(sn.group(1)) if sn else ""))
+        if not res and re.search(r"anomaly|captcha|blocked", page, re.I):
+            return "ERROR: DuckDuckGo ne roka (bahut request). Thodi der baad, ya BRAVE_KEY environment me daalo", False, False, None
+    if not res:
+        return "(kuch nahi mila)", False, True, None
+    return "\n\n".join("%d. %s\n%s\n%s" % (i, t, u, sn[:250]) for i, (t, u, sn) in enumerate(res, 1)) + \
+        "\n\n(kisi link ka poora text padhne ko @@WEB <link>)", False, True, None
+
+
+def notify(text):
+    """ntfy.sh (NTFY_TOPIC) ya Telegram (TG_TOKEN + TG_CHAT) par message. Kuch set na ho to chup. True/False."""
+    text = (text or "")[:900]
+    try:
+        topic, tok, chat = _env("NTFY_TOPIC"), _env("TG_TOKEN"), _env("TG_CHAT")
+        if topic:
+            urllib.request.urlopen(urllib.request.Request("https://ntfy.sh/" + urllib.parse.quote(topic), text.encode("utf-8"),
+                                                          {"Title": "Mumbai", "User-Agent": UA}), timeout=15).read()
+            return True
+        if tok and chat:
+            urllib.request.urlopen("https://api.telegram.org/bot%s/sendMessage" % tok,
+                                   urllib.parse.urlencode({"chat_id": chat, "text": "Mumbai: " + text}).encode(), timeout=15).read()
+            return True
+    except Exception as e:
+        log("notify fail: %s" % str(e)[:80])
+    return False
+
+
+def notify_bg(text):
+    threading.Thread(target=notify, args=(text,), daemon=True).start()
+
+
+def do_notify(msg):
+    if not (_env("NTFY_TOPIC") or (_env("TG_TOKEN") and _env("TG_CHAT"))):
+        return "ERROR: notify set nahi. Environment me NTFY_TOPIC (ntfy app) ya TG_TOKEN + TG_CHAT (Telegram) daalo", False, False, None
+    ok = notify(msg or "Mumbai ka kaam")
+    return ("message bheja" if ok else "ERROR: message nahi gaya"), False, ok, None
+
+
+
 # ---------- commands padhna ----------
-CMD_NAMES = "SPEC|TEMPLATE|DEPS|WRITEB64|WRITE|EDIT|PLAN|CHECK|VERIFY|TREE|GREP|LS|READ|RUN|BG|LOG|KILL|ZIP|NOTE|DONE"
+CMD_NAMES = "SPEC|TEMPLATE|DEPS|WRITEB64|WRITE|EDIT|PLAN|CHECK|VERIFY|TREE|GREP|LS|READ|RUN|BG|LOG|KILL|UNZIP|WEB|SEARCH|NOTIFY|ZIP|NOTE|DONE"
 CMD_RE = re.compile(r"^[\s*`>_#\-]*@@(%s)\b[\s*`]*(.*)$" % CMD_NAMES)
 # "...baat.@@PLAN": command line ke beech me chipka ho to alag line bana do (kisi bhi space/backtick/quote ke baad wala nahi)
 GLUE_RE = re.compile(r"(?<=[^\s`*_\"'(\[>#\-])@@(?:%s)\b" % CMD_NAMES)
@@ -2205,7 +2794,7 @@ SPEC_GATE, REVIEW_LOOP = True, True
 SPEC_REJECT_MAX, REVIEW_ROUNDS, FINAL_REJECT_MAX = 4, 5, 8
 REVIEWER_TRIES, REVIEWER_TIMEOUT, REVIEWER_TOKENS = 3, 300, 6000
 REVIEWER_PREF = "JAAT"
-REVIEW_GEMINI = False   # True karoge to review ki request Gemini par bhi jayengi (lock ka khatra)
+REVIEW_GEMINI = True    # review me Gemini bhi, par sabse LAST me (baari-baari); pehle JAAT, Groq, NV2, DSX, DS chalte hain taaki Gemini ka limit kam kharch ho
 REVIEW_EXT = (".kt", ".java", ".py", ".js", ".ts", ".go", ".rs", ".c", ".cpp", ".xml", ".html", ".css", ".kts", ".gradle")
 SPEC_FILE = "SPEC.md"
 _LAST_BUSY = [0.0]
@@ -2486,13 +3075,34 @@ def parse_json_reply(text):
 
 
 def reviewer_names(writer=None):
-    names = [n for n in order() if APIS[n]["type"] == "oai"]
-    if not REVIEW_GEMINI:
-        names = [n for n in names if group_of(n) != "gemini"] or names
-    if REVIEWER_PREF in names:
-        names.remove(REVIEWER_PREF)
-        names.insert(0, REVIEWER_PREF)
-    return names
+    """Review ka order: JAAT, baaki oai (Groq, NV2, DSX...), phir DS (chhoti file par), sabse last Gemini (baari-baari)."""
+    alln = [n for n in order() if APIS[n]["type"] in ("oai", "proxy_get")]
+    gem = [n for n in alln if group_of(n) == "gemini"]
+    oai = [n for n in alln if APIS[n]["type"] == "oai" and n not in gem]
+    plain = [n for n in alln if APIS[n]["type"] != "oai"]
+    if REVIEWER_PREF in oai:
+        oai.remove(REVIEWER_PREF)
+        oai.insert(0, REVIEWER_PREF)
+    names = oai + plain + (gem if REVIEW_GEMINI else [])
+    return names or gem
+
+
+def ask_review(name, cfg, system, user):
+    """(jawab, kata?) ya None. oai ho to ask_oai; DS jaise chhote proxy par sirf tab jab prompt uski limit me aaye."""
+    if cfg["type"] == "oai":
+        return ask_oai(name, cfg, [{"role": "system", "content": system}, {"role": "user", "content": user}])
+    text = system + "\n\n" + user
+    if len(text) > cfg.get("max_chars", 3000) or (
+            cfg["type"] == "proxy_get" and len(urllib.parse.quote(text, safe="")) > cfg.get("max_url", 6000)):
+        log("⏭ review: %s ke liye prompt bada (%d char)" % (name, len(text)))
+        return None
+    try:
+        out = PLAIN[cfg["type"]](cfg, models_of(cfg)[0], text)
+    except Exception as e:
+        ev("note", text="%s review fail: %s" % (name, str(e)[:80]))
+        penalize(name, 90)
+        return None
+    return (out, False) if out and out.strip() else None
 
 
 def reviewer_call(system, user):
@@ -2503,7 +3113,7 @@ def reviewer_call(system, user):
                 return None, None
             cfg = dict(APIS[name], max_tokens=REVIEWER_TOKENS, total_timeout=min(REVIEWER_TIMEOUT, APIS[name].get("total_timeout", REVIEWER_TIMEOUT)))
             try:
-                res = ask_oai(name, cfg, [{"role": "system", "content": system}, {"role": "user", "content": user}])
+                res = ask_review(name, cfg, system, user)
             except Exception as e:
                 log("reviewer %s: %s" % (name, e))
                 res = None
@@ -2772,7 +3382,7 @@ def call_slot(name, model, system, user):
             return None
         cfg = dict(APIS[name], models=[model], max_tokens=REVIEWER_TOKENS, total_timeout=min(REVIEWER_TIMEOUT, APIS[name].get("total_timeout", REVIEWER_TIMEOUT)))
         try:
-            res = ask_oai(name, cfg, [{"role": "system", "content": system}, {"role": "user", "content": user}])
+            res = ask_review(name, cfg, system, user)
         except Exception as e:
             log("reviewer %s/%s: %s" % (name, model, e))
             res = None
@@ -3002,9 +3612,13 @@ def run_cmd(k, a, body="", complete=True):
             p = safe(a)
             with open(p, "rb") as f:
                 raw = f.read()
-            if b"\0" in raw[:4096]:
+            conv = read_any(p, raw)
+            if conv is not None:
+                text = conv
+            elif b"\0" in raw[:4096]:
                 return "(binary file, %d bytes) padha nahi ja sakta" % len(raw), False, True, None
-            text = raw.decode("utf-8", "replace")
+            else:
+                text = raw.decode("utf-8", "replace")
             lines = text.split("\n")
             if rng:
                 s, e = max(1, rng[0]), max(rng[0], rng[1])
@@ -3022,11 +3636,15 @@ def run_cmd(k, a, body="", complete=True):
                 data = base64.b64decode("".join(body.split()))
             else:
                 data = unlink(body).encode("utf-8")
+            note = ""
+            ext = os.path.splitext(p)[1].lower()
+            if k == "WRITE" and ext in MAKE_EXT:
+                data, note = make_binary(ext, unlink(body))
             os.makedirs(os.path.dirname(p), exist_ok=True)
             snap(p)
             with open(p, "wb") as f:
                 f.write(data)
-            return "likha: %s (%d bytes)" % (a, len(data)), True, True, None
+            return "likha: %s (%d bytes)%s" % (a, len(data), note), True, True, None
         if k == "EDIT":
             p = safe(a)
             if not os.path.isfile(p):
@@ -3047,6 +3665,14 @@ def run_cmd(k, a, body="", complete=True):
             with open(p, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
                 f.write(new)
             return "badlav ho gaya: %s" % a, True, True, None
+        if k == "UNZIP":
+            return do_unzip(a)
+        if k == "WEB":
+            return do_web(a)
+        if k == "SEARCH":
+            return do_search(a)
+        if k == "NOTIFY":
+            return do_notify(a)
         if k == "NOTE":
             append_pm(["- " + a])
             return "PROJECT.md me likha", False, True, None
@@ -3388,6 +4014,7 @@ def run_agent(task):
             wl("ZIP %s" % STATE["proj"])
             ev("step", kind="ZIP", arg=STATE["proj"], out=zr, ok=zok, prov="mumbai")
         ev("done", text=(summary or "Kaam poora") + warn + TRACK.get("final_warn", ""), prov=name, steps=step)
+        notify_bg("✅ %s: %s" % (STATE["proj"], (summary or "Kaam poora")[:300]))
 
     for step in range(1, MAX_STEPS + 1):
         STATE["step"] = step
@@ -3662,6 +4289,7 @@ def run_agent(task):
         add("user", "Natija:\n" + "\n\n".join(out))
         save_state()
     ev("err", text="⚠ %d kadam ho gaye, ruk gaya. Aage badhana ho to 'aage badho' likho." % MAX_STEPS)
+    notify_bg("⚠ %s: %d kadam ho gaye, ruk gaya. Aage badhna ho to chat me 'aage badho' likho." % (STATE["proj"], MAX_STEPS))
 
 
 def selftest():
@@ -3749,24 +4377,36 @@ PAGE = r"""<!doctype html><html><head><meta charset=utf-8>
 @media(prefers-color-scheme:dark){:root{--bg:#262624;--fg:#eceae4;--mut:#9a978f;--card:#33322f;--bd:#45433f}}
 *{box-sizing:border-box}html,body{height:100%;margin:0}
 body{background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif;display:flex;flex-direction:column}
-header{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:1px solid var(--bd)}
-header b{flex:1;min-width:0;font-size:17px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ib{background:none;border:1px solid var(--bd);color:var(--fg);border-radius:10px;padding:6px 10px;font-size:15px;flex:none;white-space:nowrap}
-#chat{flex:1;overflow-y:auto;padding:12px 12px 4px}
-.msg{margin:10px 0;white-space:pre-wrap;word-wrap:break-word}
-.user{background:var(--card);border-radius:16px;padding:9px 13px;margin-left:18%}
+header{display:flex;align-items:center;gap:2px;padding:6px 8px;border-bottom:1px solid var(--bd);background:var(--bg)}
+header b{flex:none;max-width:62%;display:flex;align-items:center;gap:6px;font-size:16px;font-weight:600;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:7px 12px;border-radius:12px}
+header b:active{background:var(--card)}
+header b i{font-style:normal;color:var(--mut);font-size:12px}
+header .sp{flex:1}
+.ib{background:none;border:0;color:var(--mut);border-radius:10px;padding:7px 9px;font-size:17px;flex:none;white-space:nowrap}
+.ib:active{background:var(--card)}
+#csheet .ib,#sheet .ib,#psheet .ib{border:1px solid var(--bd);color:var(--fg);font-size:14px}
+#chat{flex:1;overflow-y:auto;padding:14px 14px 6px;scroll-behavior:smooth}
+#chat>*{max-width:760px;margin-left:auto;margin-right:auto}
+.msg{margin:14px auto;white-space:pre-wrap;word-wrap:break-word;line-height:1.6}
+.user{background:var(--card);border-radius:20px;padding:10px 15px;margin-left:auto;margin-right:0;width:fit-content;max-width:86%}
 .chip{display:inline-block;font-size:11px;color:var(--mut);border:1px solid var(--bd);border-radius:8px;padding:0 6px;margin-left:6px}
-.step{border:1px solid var(--bd);border-radius:12px;margin:8px 0;background:var(--card)}
-.step summary{padding:8px 12px;font-size:14px;cursor:pointer;word-break:break-all}
+.step{border:1px solid var(--bd);border-radius:12px;margin:6px auto;background:transparent}
+.step summary{padding:7px 12px;font-size:13px;color:var(--mut);cursor:pointer;word-break:break-all;list-style:none}
+.step summary::-webkit-details-marker{display:none}
+.step[open]{background:var(--card)}
 .step pre{margin:0;padding:8px 12px;border-top:1px solid var(--bd);font-size:12px;white-space:pre-wrap;word-break:break-all}
 .bad summary{color:#c0392b}
 .done{border-left:3px solid #2e9e5b;padding-left:10px}
 .err{color:#c0392b}.note{color:var(--mut);font-size:13px;text-align:center;margin:6px 0}
 #hint{color:var(--mut);text-align:center;margin-top:30vh;padding:0 20px}
-#bar{padding:4px 12px;color:var(--acc);font-size:13px;display:none}
-footer{display:flex;gap:6px;align-items:flex-end;padding:8px 10px calc(8px + env(safe-area-inset-bottom));border-top:1px solid var(--bd)}
-textarea{flex:1;max-height:130px;resize:none;border:1px solid var(--bd);border-radius:14px;padding:9px 12px;font:16px system-ui;background:var(--bg);color:var(--fg)}
-#send{background:var(--acc);border:0;color:#fff;border-radius:50%;width:42px;height:42px;font-size:18px}
+#bar{display:none;align-items:center;gap:8px;padding:6px 16px;font-size:14px;color:var(--mut);max-width:760px;width:100%;margin:0 auto}
+#bar .st{color:var(--acc);font-size:17px;display:inline-block;animation:spin 2.4s linear infinite}
+#bar .tx{background:linear-gradient(90deg,var(--mut) 30%,var(--fg) 50%,var(--mut) 70%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shim 1.6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes shim{from{background-position:200% 0}to{background-position:-200% 0}}
+footer{display:flex;gap:6px;align-items:flex-end;padding:8px 10px calc(10px + env(safe-area-inset-bottom));max-width:780px;width:100%;margin:0 auto}
+footer textarea{flex:1;max-height:130px;resize:none;border:1px solid var(--bd);border-radius:22px;padding:11px 16px;font:16px system-ui;background:var(--card);color:var(--fg);outline:none}
+#send{background:var(--acc);border:0;color:#fff;border-radius:50%;width:42px;height:42px;font-size:18px;flex:none}
 #sheet,#psheet,#csheet{position:fixed;inset:0;background:var(--bg);display:none;flex-direction:column;z-index:5}
 #sheet .top,#psheet .top,#csheet .top{display:flex;gap:6px;align-items:center;padding:10px;border-bottom:1px solid var(--bd)}
 #sheet .top b,#psheet .top b,#csheet .top b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
@@ -3776,17 +4416,17 @@ textarea{flex:1;max-height:130px;resize:none;border:1px solid var(--bd);border-r
 .rev{border-left:3px solid #2e9e5b;padding-left:10px;font-size:14px}.rev.badr{border-left-color:#c0392b}
 .row{display:flex;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--bd)}
 .row span{flex:1;word-break:break-all}.row a{color:var(--acc);text-decoration:none;font-size:20px;cursor:pointer}
-#cta{flex:1;max-height:none;margin:6px 12px 10px;font:12px/1.4 monospace;border-radius:10px;white-space:pre}
+#cta{flex:1;max-height:none;margin:6px 12px 10px;font:12px/1.4 monospace;border-radius:10px;white-space:pre;border:1px solid var(--bd);background:var(--bg);color:var(--fg);padding:8px}
 #fv{display:none;margin:0;padding:10px 12px;border-top:1px solid var(--bd);font-size:12px;white-space:pre-wrap;word-break:break-all;max-height:45%;overflow:auto}
 </style></head><body>
-<header><b id=ttl onclick="openProjects()">Mumbai 🌇</b>
+<header><b id=ttl onclick="openProjects()" title="Project / chat badlo">🌇 Mumbai <i>▾</i></b><span class=sp></span>
 <button class=ib onclick="act('/test')">🩺</button>
 <button class=ib onclick="openConf()">⚙</button>
 <button class=ib onclick="openFiles()">📁</button>
 <button class=ib onclick="act('/undo')">↩</button>
 <button class=ib onclick="act('/new')">🆕</button></header>
-<div id=chat><div id=hint>Kaam likho, jaise "ek todo app banao html me".<br>Main files bana ke dunga. 📁 me dekh aur download kar sakte ho. Upar naam dabao to project badal sakte ho.</div></div>
-<div id=bar></div>
+<div id=chat><div id=hint>Kaam likho, jaise "ek todo app banao html me".<br>Main files bana ke dunga. 📁 me dekh aur download kar sakte ho. Upar project ka naam (▾) dabao to dusra project / chat khul jayega.</div></div>
+<div id=bar><span class=st>✻</span><span class=tx id=bt>Soch raha hoon…</span></div>
 <footer>
 <button class=ib onclick="document.getElementById('up').click()">📎</button>
 <textarea id=t rows=1 placeholder="Kaam likho..."></textarea>
@@ -3809,15 +4449,15 @@ textarea{flex:1;max-height:130px;resize:none;border:1px solid var(--bd);border-r
 <div id=cst style="padding:6px 12px;display:flex;flex-wrap:wrap;gap:4px"></div>
 <textarea id=cta spellcheck=false></textarea></div>
 <script>
-var last=0,running=false,sending=false,polling=false,redo=false,boot='',chat=document.getElementById('chat'),sheet=document.getElementById('sheet'),psheet=document.getElementById('psheet');
+var lastKind='',last=0,running=false,sending=false,polling=false,redo=false,boot='',chat=document.getElementById('chat'),sheet=document.getElementById('sheet'),psheet=document.getElementById('psheet');
 function el(tag,cls,txt){var e=document.createElement(tag);if(cls)e.className=cls;if(txt!=null)e.textContent=txt;return e}
-var ICON={LS:'📂',READ:'📖',WRITE:'📝',WRITEB64:'🖼',EDIT:'✏️',TREE:'🌳',GREP:'🔎',RUN:'⚙️',BG:'🚀',LOG:'📜',KILL:'🛑',ZIP:'📦',NOTE:'🗒',VERIFY:'🛡'},plan=[];
+var ICON={LS:'📂',READ:'📖',WRITE:'📝',WRITEB64:'🖼',EDIT:'✏️',TREE:'🌳',GREP:'🔎',RUN:'⚙️',BG:'🚀',LOG:'📜',KILL:'🛑',ZIP:'📦',UNZIP:'📂',WEB:'🌐',SEARCH:'🔍',NOTIFY:'🔔',NOTE:'🗒',VERIFY:'🛡'},plan=[];
 function toast(t){chat.appendChild(el('div','msg err',t));chat.scrollTop=chat.scrollHeight}
 function render(e){
  var h=document.getElementById('hint');if(h)h.style.display='none';
  if(e.t=='user')chat.appendChild(el('div','msg user',e.text));
  else if(e.t=='ai'){var d=el('div','msg',e.text);if(e.prov)d.appendChild(el('span','chip',e.prov));chat.appendChild(d)}
- else if(e.t=='step'){var s=el('details','step'+(e.ok?'':' bad'));
+ else if(e.t=='step'){lastKind=e.kind;var s=el('details','step'+(e.ok?'':' bad'));
   s.appendChild(el('summary',null,(ICON[e.kind]||'•')+' '+e.kind+' '+e.arg));
   if(e.out)s.appendChild(el('pre',null,e.out));chat.appendChild(s)}
  else if(e.t=='done'){var d=el('div','msg done','✅ '+e.text);
@@ -3838,10 +4478,11 @@ function poll(){if(polling)return;polling=true;
   j.events.forEach(function(e){if(e.id<=last)return;last=e.id;
    if(e.t=='reset')fresh();else render(e)});
   running=j.running;var b=document.getElementById('bar');
-  b.style.display=running?'block':'none';
-  b.textContent='⏳ '+(j.plan_n?'plan '+j.plan_done+'/'+j.plan_n+' · ':'')+'kadam '+j.step+'/'+j.max+(j.prov?' · '+j.prov:'');
+  b.style.display=running?'flex':'none';
+  var W={READ:'Padh raha hoon',WRITE:'Likh raha hoon',WRITEB64:'Likh raha hoon',EDIT:'Badal raha hoon',RUN:'Chala ke dekh raha hoon',BG:'Background me chala raha hoon',VERIFY:'Jaanch raha hoon',GREP:'Dhundh raha hoon',TREE:'Files dekh raha hoon',WEB:'Web padh raha hoon',SEARCH:'Search kar raha hoon',UNZIP:'Khol raha hoon'};
+  document.getElementById('bt').textContent=(W[lastKind]||'Soch raha hoon')+'… '+(j.plan_n?'plan '+j.plan_done+'/'+j.plan_n+' · ':'')+'kadam '+j.step+'/'+j.max+(j.prov?' · '+j.prov:'');
   document.getElementById('send').textContent=running?'⏹':'➤';
-  document.getElementById('ttl').textContent='Mumbai 🌇 · '+j.proj;
+  document.getElementById('ttl').innerHTML='';var tt=document.getElementById('ttl');tt.appendChild(document.createTextNode('📂 '+j.proj+' '));tt.appendChild(el('i',null,'▾'));
   if(near&&j.events.length)chat.scrollTop=chat.scrollHeight
  }).catch(function(){}).then(function(){polling=false;if(redo){redo=false;poll()}})}
 setInterval(poll,1000);poll();
