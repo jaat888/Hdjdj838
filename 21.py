@@ -33,9 +33,8 @@ def _env(name, default=""):
 #   min_gap    is provider par do request ke beech kam se kam itne second
 #   rate_cool  429/limit aane par itne second aaram (Gemini ka lock ~2 ghante => 7200)
 #   retry_429  429 aane par usi provider ko itni baar (ruk ke) dobara try karo, phir hi cooldown (default 1)
-PRIORITY = ["JAAT", "GEM", "GEM2", "GEM3", "DS", "GROQ", "NV2", "DAI"]
-DISABLED = set()
-REMOVED = {"DSX"}           # DSX hata diya (bekar tha); purani providers.json me ho to chupchap chhod do
+PRIORITY = ["JAAT", "GEM", "GEM2", "GEM3", "DS", "GROQ", "NV2", "DAI", "DSX"]
+DISABLED = {"DSX"}          # DSX bekar: band (⚙ AI panel se chahe to chalu karo)
 APIS = {
     "JAAT": {                      # JAAT (main, sabse zyada yahi chalega). Ek time par 1 request; 429 par 2 baar retry, cooldown bahut kam
         "type": "oai",
@@ -50,6 +49,18 @@ APIS = {
         "min_gap": 1,
         "rate_cool": 15,           # 429 ke baad sirf 15 sec aaram (lock nahi)
         "retry_429": 2,            # 429 par 2 baar ruk ke dobara
+    },
+    "DSX": {                       # DeepSeek (ab sabse last). Key: environment me DSX_KEY, ya ⚙ se
+        "type": "oai",
+        "base": "https://my-ds-api.jaat.blitz.cloud/v1",
+        "key": _env("DSX_KEY"),
+        "models": ["deepseek-default"],
+        "timeout": 180,
+        "total_timeout": 400,
+        "group": "deepseek",
+        "max_conc": 1,
+        "min_gap": 1,
+        "rate_cool": 45,
     },
     "GEM": {                       # Gemini #1 (secondary)
         "type": "oai",
@@ -333,7 +344,7 @@ ROT = {}                   # group -> ginti (baari-baari ke liye)
 COOL_FILE = os.path.join(ROOT, ".mumbai", "cool.json")      # restart/rebuild ke baad bhi lock yaad rahe
 CONF_FILE = os.path.join(ROOT, ".mumbai", "providers.json")  # bina rebuild ke provider badalne ki file
 _CONF_MT = [0.0]
-CONF_VER = 19              # purani providers.json ka priority (JAAT pehle, DSX hata) naye order ko na bigaade
+CONF_VER = 19              # purani providers.json ka priority (JAAT pehle, DSX last) naye order ko na bigaade
 CONF_KEYS = ("type", "base", "key", "models", "timeout", "total_timeout", "max_chars", "max_url", "max_ctx",
              "max_tokens", "vision", "tier", "group", "max_conc", "min_gap", "rate_cool", "retry_429", "no_system")
 
@@ -460,8 +471,6 @@ def conf_apply(text, write=False):
         raise ValueError("sabse upar {} object chahiye")
     newp = {}
     for name, c in (d.get("providers") or {}).items():
-        if name in REMOVED:
-            continue
         if not isinstance(c, dict) or not re.fullmatch(r"\w{1,20}", str(name)):
             raise ValueError("provider '%s' galat" % name)
         base, c = dict(APIS.get(name, {})), dict(c)
@@ -3475,7 +3484,7 @@ def classify_task(task):
         return m.group(1).lower()
     c = len(CODE_WORD_RE.findall(t))
     d = len(DOC_WORD_RE.findall(t))
-    return "code" if c and c >= d else "light"
+    return "code" if (c and c >= d) or build_intent(t) else "light"
 
 
 def cur_mode():
@@ -4527,7 +4536,7 @@ def run_agent(task):
 ASK_WAIT = float(_env("ASK_WAIT", "600"))           # user ke jawab ka intezaar (second, 10 min). Na aaye to 3 AI faisla karte hain
 CRIT_REJECT_MAX, ESC_AT, ESC_MAX = 2, 4, 2          # criteria 2 baar mana; aakhri review 4 baar mana -> user se poochho; ek kaam me max 2 baar
 SPLIT_ROLES = _env("SPLIT_ROLES", "1") != "0"       # plan/review mazboot model se, likhna sasta/tez model se (0 = band)
-TIER = {"JAAT": "strong", "NV2": "strong", "GEM": "strong", "GEM2": "strong", "GEM3": "strong",
+TIER = {"JAAT": "strong", "NV2": "strong", "GEM": "strong", "GEM2": "strong", "GEM3": "strong", "DSX": "strong",
         "DS": "cheap", "GROQ": "cheap", "DAI": "cheap"}          # providers.json me "tier": "strong"/"cheap" se badal sakte ho
 SEEKHA_FILE = os.path.join(ROOT, ".mumbai", "seekha.md")
 PREVIEW_DIR = os.path.join(ROOT, ".mumbai", "preview")
@@ -5208,14 +5217,30 @@ html,body{max-width:100%;overflow-x:hidden;overscroll-behavior-x:none}
 .md pre{overflow-x:auto;max-width:100%}
 .md table{display:block;max-width:100%;overflow-x:auto}
 .md img,.step img{max-width:100%;height:auto}
+.user{background:#f3f4f6;color:#111827;border:1px solid var(--bd);border-radius:18px 18px 4px 18px}
+#chat>.user{margin-left:auto;margin-right:max(0px,calc((100% - 760px)/2));max-width:86%}
+.step,.step[open],.step.plan{background:#fff}
+.md code{background:#f3f4f6}
+.step.plan summary{pointer-events:none;padding:8px 12px;font-size:13px}
+.step.plan .it{display:none}
+.step.act{border-style:dashed}
+.step.act>summary{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:10px 12px}
+.actb{padding:6px 8px;border-top:1px solid var(--bd);max-height:50vh;overflow:auto}
+.actb .step{margin:4px 0}
+#send{width:48px;height:48px}
+#send.stop{background:#f87171;font-size:22px;font-weight:300}
+footer .attach{width:44px;height:44px;border-radius:50%;background:var(--card);display:flex;align-items:center;justify-content:center;color:var(--mut);padding:0;flex:none}
+#fbtn{display:flex;align-items:center;color:var(--fg);padding:8px 10px}
+footer textarea{min-height:54px;max-height:200px;padding:15px 18px;line-height:1.4}
 </style></head><body>
 <header><b id=ttl onclick="openProjects()" title="Project / chat badlo">🌇 Mumbai <i>▾</i></b><span class=sp></span>
+<button class=ib id=fbtn type=button onclick="openFiles()" aria-label=Files><svg width=22 height=22 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
 <button class=ib id=mnb type=button onclick="toggleMenu(event)" aria-label=Menu>&#8943;</button>
-<div id=menu><button type=button onclick="mnu('/test')">Test</button><button type=button onclick="mnu('conf')">AI settings</button><button type=button onclick="mnu('files')">Files</button><button type=button onclick="mnu('/undo')">Undo</button><button type=button onclick="mnu('/new')">New chat</button></div></header>
+<div id=menu><button type=button onclick="mnu('/test')">Test</button><button type=button onclick="mnu('conf')">AI settings</button><button type=button onclick="mnu('/undo')">Undo</button><button type=button onclick="mnu('/new')">New chat</button></div></header>
 <div id=chat><div id=hint>Kaam likho, jaise "ek todo app banao html me".<br>Main files bana ke dunga. 📁 me dekh aur download kar sakte ho. Upar project ka naam (▾) dabao to dusra project / chat khul jayega.</div></div>
 <div id=bar><span class=st>✻</span><span class=tx id=bt>Soch raha hoon…</span></div>
 <footer>
-<button class=ib onclick="document.getElementById('up').click()">📎</button>
+<button class="ib attach" type=button onclick="document.getElementById('up').click()" aria-label=Attach><svg width=22 height=22 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.9 stroke-linecap=round stroke-linejoin=round><path d="M21.4 11.1l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg></button>
 <textarea id=t rows=1 placeholder="Kaam likho..."></textarea>
 <button id=send onclick="sendBtn()">➤</button>
 <input type=file id=up multiple style="display:none" onchange="upload(this.files)"></footer>
@@ -5266,20 +5291,23 @@ function copyText(t,btn){var ok=function(){if(btn){var o=btn.textContent;btn.tex
  if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(ok,function(){fb()});else fb();
  function fb(){var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy');ok()}catch(x){}a.remove()}}
 function inner(line,bad){ /* andar ki jaanch: sab review/SPEC/CHECK ek band line me */
- if(!chk){chk=el('details','step chk');chk.appendChild(el('summary',null,''));chkN=[0,0];chat.appendChild(chk)}
+ if(!chk){chk=el('details','step chk');chk.appendChild(el('summary',null,''));chkN=[0,0];actBox().appendChild(chk);actSay('Andar ki jaanch')}
  var l=el('div','ln'+(bad===true?' b':bad===false?' g':''),line);chk.appendChild(l);
  if(bad===true)chkN[1]++;else if(bad===false)chkN[0]++;
  chk.querySelector('summary').textContent='🔍 Andar ki jaanch'+(chkN[0]||chkN[1]?' · '+chkN[0]+' theek'+(chkN[1]?' · '+chkN[1]+' sudhar':''):'');
  chk.classList.toggle('hasbad',chkN[1]>0)}
 var INNER=/^(🔍|🧪|🚶|✨|📐|🧾)/,askBox=null;
 function drawPlan(){if(!planBox)return;var done=planBox.items.filter(function(x){return x.ok}).length,n=planBox.items.length;
- planBox.sum.textContent='📋 Plan · '+done+'/'+n;planBox.bar.style.width=(n?100*done/n:0)+'%';
+ planBox.sum.textContent='Plan  '+done+'/'+n;planBox.bar.style.width=(n?100*done/n:0)+'%';
  planBox.items.forEach(function(x){x.d.textContent=(x.ok?'\u2713  ':'\u25CB  ')+x.t;x.d.className='it'+(x.ok?' ok':'')});
  if(done==n&&n)planBox.c.open=false}
 function toggleMenu(ev){ev.stopPropagation();var m=document.getElementById('menu');m.style.display=m.style.display=='block'?'none':'block'}
 function mnu(a){document.getElementById('menu').style.display='none';if(a=='conf')openConf();else if(a=='files')openFiles();else act(a)}
 document.addEventListener('click',function(){var m=document.getElementById('menu');if(m)m.style.display='none'});
 var NOISE=/(HTTP\s?\d{3}|\b429\b|rate.?limit|bheed|aaram|ruk ke dobara|org_\w+|cooldown)/i,PROV=/^(JAAT|GEM\d?|GROQ|DS|NV2|DAI)\b/;
+var act=null,actBody=null,actN=0,lastAi=null,doneShown=false;
+function actBox(){if(!act){act=el('details','step act');act.appendChild(el('summary',null,'Kaam chal raha hai'));actBody=el('div','actb');act.appendChild(actBody);actN=0;chat.appendChild(act)}return actBody}
+function actSay(t){if(!act)return;actN++;act.firstChild.textContent=t+(actN>1?'  \u00b7  '+actN+' kadam':'')}
 function noisy(e){var x=e.text||'';return (e.t=='note'&&NOISE.test(x))||(e.t=='err'&&PROV.test(x)&&NOISE.test(x))}
 function cleanStep(s){var V={EDIT:'Badlo',WRITE:'Banao',WRITEB64:'Banao',VERIFY:'Jaanch',RUN:'Chalao',READ:'Padho',CHECK:'Jaanch'};
  return String(s).replace(/^@@(\w+)\s*/,function(m,c){return (V[c]||c)+': '}).replace(/\s*\u2192\s*/g,' \u2014 ')}
@@ -5289,14 +5317,14 @@ function render(e){
  if(noisy(e))return;
  var h=document.getElementById('hint');if(h)h.style.display='none';
  if(e.t!='review'&&!(e.t=='note'&&INNER.test(e.text||'')))chk=null;
- if(e.t=='user')chat.appendChild(el('div','msg user',e.text));
- else if(e.t=='ai'){var d=mdEl('msg',e.text);if(e.prov)d.appendChild(el('span','chip',e.prov));chat.appendChild(d)}
+ if(e.t=='user'){act=null;lastAi=null;doneShown=false;chat.appendChild(el('div','msg user',e.text))}
+ else if(e.t=='ai'){var d=mdEl('msg',e.text);if(e.prov)d.appendChild(el('span','chip',e.prov));if(act){actBody.appendChild(d);lastAi=d;actSay('Soch raha hoon')}else chat.appendChild(d)}
  else if(e.t=='step'){lastKind=e.kind;var s=el('details','step'+(e.ok?'':' bad'));
   s.appendChild(el('summary',null,(ICON[e.kind]||'•')+' '+e.kind+' '+e.arg));
   if(e.out)s.appendChild(el('pre',null,e.out));
   if(e.img){var im=el('img');im.src='/raw?p='+encodeURIComponent(e.img);im.style.cssText='max-width:100%;display:block;margin:6px 12px 10px;border:1px solid var(--bd);border-radius:8px';s.appendChild(im);s.open=true}
-  chat.appendChild(s)}
- else if(e.t=='done'){var d=mdEl('msg done','✅ '+e.text);
+  actBox().appendChild(s);actSay((ICON[e.kind]||'•')+' '+e.kind+' '+e.arg)}
+ else if(e.t=='done'){doneShown=true;lastAi=null;if(act)act.firstChild.textContent='Kaam ke kadam'+(actN?' \u00b7 '+actN:'');act=null;var d=mdEl('msg done','✅ '+e.text);
   d.appendChild(el('span','chip',e.prov+' · '+e.steps+' kadam'));
   if(e.zip){var a=el('a','dl','⬇ '+(e.proj||'project')+'.zip download');a.href='/zip';d.appendChild(document.createElement('br'));d.appendChild(a)}
   chat.appendChild(d)}
@@ -5308,7 +5336,7 @@ function render(e){
  else if(e.t=='check'){if(planBox&&planBox.items[e.n-1]){planBox.items[e.n-1].ok=true;drawPlan()}}
  else if(e.t=='review')inner((e.ok?'✅ ':'🐞 ')+e.title+(e.prov?' ('+e.prov+')':'')+'\n'+e.text,!e.ok);
  else if(e.t=='understand'){var u=el('details','step');u.appendChild(el('summary',null,'🧠 Samajh · '+(e.kind||'?')+(e.done&&e.done.length?' · '+e.done.length+' criteria':'')));
-  var ub=el('div','ln',(e.goal||'')+(e.done&&e.done.length?'\n\nKaam kab poora:\n'+e.done.join('\n'):''));ub.style.cssText='padding:8px 12px;font-size:13px;white-space:pre-wrap;border-top:1px solid var(--bd)';u.appendChild(ub);chat.appendChild(u)}
+  var ub=el('div','ln',(e.goal||'')+(e.done&&e.done.length?'\n\nKaam kab poora:\n'+e.done.join('\n'):''));ub.style.cssText='padding:8px 12px;font-size:13px;white-space:pre-wrap;border-top:1px solid var(--bd)';u.appendChild(ub);actBox().appendChild(u);actSay('Samajh raha hoon')}
  else if(e.t=='ask'){var a=el('div','step ask');a.style.cssText='padding:10px 12px;border-color:var(--acc)';
   a.appendChild(el('div',null,'❓ '+e.text));
   (e.opts||[]).forEach(function(o){var b=el('button','ib',o);b.style.cssText='border:1px solid var(--bd);margin:6px 6px 0 0;color:var(--fg);font-size:14px';b.onclick=function(){post('/run',{task:o}).then(poll)};a.appendChild(b)});
@@ -5316,9 +5344,9 @@ function render(e){
   askBox={c:a,st:st};chat.appendChild(a)}
  else if(e.t=='ask_done'){if(askBox){askBox.st.textContent=(e.how=='user'?'✅ aapka jawab: ':'🗳 3 AI ne tay kiya: ')+e.text;askBox.c.style.borderColor='var(--bd)';askBox=null}}
  else if(e.t=='err')chat.appendChild(el('div','msg err',e.text));
- else if(e.t=='note'){if(INNER.test(e.text||''))inner(e.text,null);else chat.appendChild(el('div','note',e.text))}
+ else if(e.t=='note'){if(INNER.test(e.text||''))inner(e.text,null);else(/^(⏳|⚠|❌|Ruk)/.test(e.text||'')||!act?chat:actBody).appendChild(el('div','note',e.text))}
 }
-function fresh(){plan=[];chk=null;planBox=null;askBox=null;chat.innerHTML='';var h=el('div',null,'Naya chat shuru. Kaam likho.');h.id='hint';chat.appendChild(h)}
+function fresh(){act=null;lastAi=null;doneShown=false;plan=[];chk=null;planBox=null;askBox=null;chat.innerHTML='';var h=el('div',null,'Naya chat shuru. Kaam likho.');h.id='hint';chat.appendChild(h)}
 function poll(){if(polling)return;polling=true;
  fetch('/events?after='+last).then(function(r){if(r.status==401){location.reload();throw 0}return r.json()}).then(function(j){
   if(boot&&j.boot!==boot){boot=j.boot;last=0;fresh();redo=true;return}
@@ -5326,11 +5354,11 @@ function poll(){if(polling)return;polling=true;
   var near=chat.scrollHeight-chat.scrollTop-chat.clientHeight<120;
   j.events.forEach(function(e){if(e.id<=last)return;last=e.id;
    if(e.t=='reset')fresh();else render(e)});
-  running=j.running;var b=document.getElementById('bar');
+  running=j.running;if(!running&&lastAi&&!doneShown){chat.appendChild(lastAi);lastAi=null}var b=document.getElementById('bar');
   b.style.display=running?'flex':'none';
   var W={READ:'Padh raha hoon',WRITE:'Likh raha hoon',WRITEB64:'Likh raha hoon',EDIT:'Badal raha hoon',RUN:'Chala ke dekh raha hoon',BG:'Background me chala raha hoon',VERIFY:'Jaanch raha hoon',GREP:'Dhundh raha hoon',TREE:'Files dekh raha hoon',WEB:'Web padh raha hoon',SEARCH:'Search kar raha hoon',UNZIP:'Khol raha hoon',LOOK:'PDF dekh raha hoon'};
   document.getElementById('bt').textContent=(W[lastKind]||'Soch raha hoon')+'… '+(j.plan_n?'('+j.plan_done+'/'+j.plan_n+')':'');
-  sendIcon();document.getElementById('t').placeholder=j.asking?'Jawab likho...':(running?'Beech me message bhejo (queue hoga)...':'Kaam likho...');
+  sendIcon();document.getElementById('t').placeholder=j.asking?'Jawab likho...':(running?'Beech me bhejo (queue)...':'Kaam likho...');
   document.getElementById('ttl').innerHTML='';var tt=document.getElementById('ttl');tt.appendChild(document.createTextNode('📂 '+j.proj+' '));tt.appendChild(el('i',null,'▾'));if(j.mode)tt.appendChild(el('span','badge '+j.mode,j.mode));
   if(near&&j.events.length)chat.scrollTop=chat.scrollHeight
  }).catch(function(){}).then(function(){polling=false;if(redo){redo=false;poll()}})}
@@ -5338,14 +5366,14 @@ setInterval(poll,1000);poll();
 function post(p,b){return fetch(p,{method:'POST',body:JSON.stringify(b||{})})}
 function act(p){post(p).then(poll)}
 function act2(p,b){return post(p,b).then(function(r){if(!r.ok)return r.text().then(function(t){alert(t)})}).catch(function(e){alert('Server se baat nahi hui: '+e.message)})}
-function sendIcon(){var v=document.getElementById('t').value.trim();var sb=document.getElementById('send'),st=running&&!v;sb.textContent=st?'\u25A0':'\u27A4';sb.classList.toggle('stop',st);if(!running)sb.classList.remove('busy')}
+function sendIcon(){var v=document.getElementById('t').value.trim();var sb=document.getElementById('send'),st=running&&!v;sb.textContent=st?'\u2715':'\u27A4';sb.classList.toggle('stop',st);if(!running)sb.classList.remove('busy')}
 function sendBtn(){var t=document.getElementById('t'),v=t.value.trim();
  if(running&&!v){stopNow();return}
  if(sending||!v)return;
  sending=true;running=true;
  t.value='';t.style.height='auto';
  post('/run',{task:v}).catch(function(e){toast('❌ bheja nahi ja saka: '+e.message)}).then(function(){sending=false;poll()})}
-document.getElementById('t').addEventListener('input',function(){sendIcon();this.style.height='auto';this.style.height=Math.min(this.scrollHeight,130)+'px'});
+document.getElementById('t').addEventListener('input',function(){sendIcon();this.style.height='auto';this.style.height=Math.min(this.scrollHeight,200)+'px'});
 function upload(fs){var inp=document.getElementById('up'),list=Array.prototype.slice.call(fs),i=0;
  function next(){
   if(i>=list.length){inp.value='';if(sheet.style.display=='flex')openFiles();return}
@@ -5884,6 +5912,33 @@ EXAM_SYS = ("You examine ONE task from a user of a phone coding/document assista
 TYPE_RANK = {"android": 3, "code": 2, "light": 1, "chat": 0}
 
 
+BUILD_VERBS = ("banao", "bnao", "banado", "banana", "bana", "bna", "banaiye", "banvao", "make", "create", "build", "develop", "design")
+BUILD_NOUNS = ("app", "apps", "manager", "tool", "bot", "website", "site", "game", "system", "software", "program", "calculator", "editor",
+               "player", "tracker", "dashboard", "api", "server", "script", "extension", "plugin", "scraper", "downloader", "launcher",
+               "explorer", "browser", "clone", "application", "project", "software", "website", "chatbot")
+LANG_SAID_RE = re.compile(r"python|javascript|\bjs\b|typescript|kotlin|java\b|\bc\+\+|\bc#|golang|\brust\b|php|html|flask|django|react|node|bash|\bgo\b", re.I)
+RUN_SAID_RE = re.compile(r"terminal|cli\b|command|web\s?page|website|browser|android|apk|termux|telegram|desktop|gui|tkinter", re.I)
+
+
+def _near(w, words):
+    return w in words or bool(difflib.get_close_matches(w, words, n=1, cutoff=0.78))
+
+
+def build_intent(task):
+    """Typo/Hinglish bhi pakde: 'eak file mager bnao' = banane wala software kaam (light nahi)."""
+    ws = re.findall(r"[a-z]{3,}", (task or "").lower())
+    return any(_near(w, BUILD_VERBS) for w in ws) and any(_near(w, BUILD_NOUNS) for w in ws)
+
+
+def default_questions(task):
+    qs = []
+    if not LANG_SAID_RE.search(task or ""):
+        qs.append({"q": "Kaunsi language / framework me banau?", "options": ["Python", "JavaScript", "Kotlin (Android)", "Tum chuno"]})
+    if not RUN_SAID_RE.search(task or ""):
+        qs.append({"q": "Ye kahan chalega?", "options": ["Terminal (CLI)", "Web page", "Android app"]})
+    return qs
+
+
 def examine_task(task):
     """(dict, [providers]) ya None. 2 AI ke jawab jode: type, level, goal, done, questions."""
     user = "TASK:\n%s\n\nFILES: %s" % (task[:1500], ", ".join(list_files(40)) or "(none)")
@@ -5902,6 +5957,9 @@ def examine_task(task):
     if len(set(types)) > 1:                      # dono alag bole: shabdon wala andaza jo mile wahi
         tb = classify_task(task)
         typ = tb if tb in types else max(types, key=lambda x: TYPE_RANK[x])
+    upg = False
+    if typ in ("light", "chat") and build_intent(task):          # model ne galti se light/chat kaha: software banane wala kaam hai
+        typ, upg = "code", True
     if typ == "code" and ANDROID_TASK_RE.search(task):
         typ = "android"
     lv = []
@@ -5911,6 +5969,8 @@ def examine_task(task):
         except (TypeError, ValueError):
             pass
     level = int(round(sum(lv) / len(lv))) if lv else 5
+    if upg:
+        level = max(level, 2)
     goal = next((clip(str(d.get("goal", "")).strip(), 220) for _, d in got if str(d.get("goal", "")).strip()), "")
     done = next(([clip(str(x).strip(), 160) for x in d.get("done") if str(x).strip()][:6] for _, d in got if isinstance(d.get("done"), list) and d.get("done")), [])
     qs, seen = [], set()
@@ -5921,6 +5981,12 @@ def examine_task(task):
                 if key not in seen:
                     seen.add(key)
                     qs.append({"q": clip(str(q["q"]).strip(), 200), "options": [clip(str(o), 60) for o in (q.get("options") or [])][:4]})
+    if typ in ("code", "android"):
+        if not qs:
+            qs = default_questions(task)
+        if len(done) < 6:
+            done = done + ["Galat input ya na-mili file par saaf error message aaye, crash na ho",
+                           "Ek chhota asli test @@RUN se chale aur uska natija dikhe (sirf py_compile kaafi nahi)"][:6 - len(done)]
     return {"type": typ, "goal": goal, "level": level, "done": done, "questions": qs[:3]}, [n for n, _ in got]
 
 
@@ -6019,7 +6085,7 @@ def plan_pipeline(task, goal, level, typ):
 
 def do_understand(task):
     """Naya: 2 AI task dekhte hain, type+level tay, user se sawal, phir 3 AI plan."""
-    if len(task.split()) < 4:
+    if len(task.split()) < 4 and not build_intent(task):
         return ""
     forced = MODE_FORCE_RE.match(task)
     got = examine_task(task) if CODE_FLOW else None
