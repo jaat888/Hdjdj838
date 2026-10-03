@@ -3,6 +3,7 @@
 
 Environment variables (blitz me daalo):
   JAAT_KEY  GEM_KEY  DS_KEY  GROQ_KEY  NV2_KEY  DAI_KEY     AI ki keys (jo key nahi di wo AI band rahega)
+  UAI_KEY           (optional) UAI (unlimitedai.chat) bina login chalta hai, key ki zaroorat nahi; UAI_URL se link badal sakte ho
   NTFY_TOPIC        (optional) ntfy app ka topic, ya TG_TOKEN + TG_CHAT (Telegram): kaam khatam hone par phone par message
   BRAVE_KEY         (optional) @@SEARCH ke liye Brave Search; na do to DuckDuckGo se chalta hai
   MUMBAI_PASSWORD   (optional) login password, na do to 8888
@@ -35,7 +36,7 @@ def _env(name, default=""):
 #   min_gap    is provider par do request ke beech kam se kam itne second
 #   rate_cool  429/limit aane par itne second aaram (Gemini ka lock ~2 ghante => 7200)
 #   retry_429  429 aane par usi provider ko itni baar (ruk ke) dobara try karo, phir hi cooldown (default 1)
-PRIORITY = ["JAAT", "GEM", "GEM2", "GEM3", "DS", "GROQ", "NV2", "DAI", "DSX"]
+PRIORITY = ["JAAT", "GEM", "GEM2", "GEM3", "DS", "GROQ", "NV2", "DAI", "UAI", "DSX"]
 DISABLED = set()            # DSX wapas aa gaya: chalu (⚙ AI panel se chahe to band karo)
 APIS = {
     "JAAT": {                      # JAAT (main, sabse zyada yahi chalega). Ek time par 1 request; 429 par 2 baar retry, cooldown bahut kam
@@ -141,6 +142,16 @@ APIS = {
         "key": _env("DAI_KEY", "tryit-8803332334-5329fed31418c18274ac106f280207f3"),
         "models": ["standard"],
         "max_chars": 3000,
+    },
+    "UAI": {                       # UnlimitedAI (app.unlimitedai.chat), guest chat, bina login/proxy: DeepAI ke theek peeche
+        "type": "uai",
+        "base": _env("UAI_URL", "https://app.unlimitedai.chat/api/chat"),
+        "key": _env("UAI_KEY", "guest"),     # asli key nahi chahiye; bas 'ready' ke liye koi bhi text
+        "models": ["chat-model-reasoning"],
+        "max_chars": 6000,
+        "timeout": 150,            # reasoning model hai: dheere jawab deta hai
+        "min_gap": 2,
+        "rate_cool": 120,          # 429/limit par 2 min aaram
     },
 }
 
@@ -359,7 +370,7 @@ ROT = {}                   # group -> ginti (baari-baari ke liye)
 COOL_FILE = os.path.join(ROOT, ".mumbai", "cool.json")      # restart/rebuild ke baad bhi lock yaad rahe
 CONF_FILE = os.path.join(ROOT, ".mumbai", "providers.json")  # bina rebuild ke provider badalne ki file
 _CONF_MT = [0.0]
-CONF_VER = 19              # purani providers.json ka priority (JAAT pehle, DSX last) naye order ko na bigaade
+CONF_VER = 20              # purani providers.json ka priority (JAAT pehle, DSX last) naye order ko na bigaade
 CONF_KEYS = ("type", "base", "key", "models", "timeout", "total_timeout", "max_chars", "max_url", "max_ctx",
              "max_tokens", "vision", "tier", "group", "max_conc", "min_gap", "rate_cool", "retry_429", "no_system")
 
@@ -494,7 +505,7 @@ def conf_apply(text, write=False):
         dis = bool(c.pop("disabled", False))
         base.update({k: v for k, v in c.items() if k in CONF_KEYS})
         if base.get("type") not in ("oai",) + tuple(PLAIN):
-            raise ValueError("%s: type 'oai' (ya proxy_get/deepai) chahiye" % name)
+            raise ValueError("%s: type 'oai' (ya proxy_get/deepai/uai) chahiye" % name)
         if not str(base.get("base", "")).startswith(("http://", "https://")):
             raise ValueError("%s: base http:// ya https:// se shuru ho" % name)
         if not isinstance(base.get("models"), list) or not base["models"]:
@@ -682,7 +693,51 @@ def call_deepai(cfg, model, text):
     return extract(http(cfg["base"], body, {"api-key": cfg["key"]}))
 
 
-PLAIN = {"proxy_get": call_proxy_get, "deepai": call_deepai}
+def call_uai(cfg, model, text):
+    """UnlimitedAI guest chat: POST /api/chat, jawab SSE stream me (data: {..."delta":".."}). Login/token nahi."""
+    import uuid
+    body = json.dumps({
+        "chatId": str(uuid.uuid4()),
+        "messages": [{"id": str(uuid.uuid4()), "role": "user", "content": text,
+                      "parts": [{"type": "text", "text": text}],
+                      "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())}],
+        "selectedChatModel": model,
+        "selectedCharacterId": None,
+        "selectedStoryId": None,
+        "locale": "en",
+    }).encode("utf-8")
+    origin = "https://app.unlimitedai.chat"
+    raw = http(cfg["base"], body, {"Content-Type": "application/json", "Origin": origin, "Referer": origin + "/",
+                                   "Accept": "text/event-stream"}, timeout=int(cfg.get("timeout", 150)))
+    txt, any_d, err = [], [], ""
+    for ln in raw.splitlines():
+        ln = ln.strip()
+        if ln.startswith("data:"):
+            ln = ln[5:].strip()
+        if not ln.startswith("{"):
+            continue
+        try:
+            j = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(j, dict):
+            continue
+        if j.get("error") and not err:
+            err = str(j.get("error"))[:100]
+        d = j.get("delta")
+        if isinstance(d, str):
+            any_d.append(d)
+            if str(j.get("type", "text-delta")).startswith("text"):
+                txt.append(d)
+    out = "".join(txt) or "".join(any_d)
+    if not out.strip():
+        if err:
+            raise IOError("UAI error: %s" % err)
+        raise IOError("UAI: khali/anjaan jawab: %s" % raw[:100].replace("\n", " "))
+    return out
+
+
+PLAIN = {"proxy_get": call_proxy_get, "deepai": call_deepai, "uai": call_uai}
 
 
 def completion(text):
@@ -4820,7 +4875,7 @@ ASK_WAIT = float(_env("ASK_WAIT", "30"))           # user ke jawab ka intezaar (
 CRIT_REJECT_MAX, ESC_AT, ESC_MAX = 2, 4, 2          # criteria 2 baar mana; aakhri review 4 baar mana -> user se poochho; ek kaam me max 2 baar
 SPLIT_ROLES = _env("SPLIT_ROLES", "1") != "0"       # plan/review mazboot model se, likhna sasta/tez model se (0 = band)
 TIER = {"JAAT": "strong", "NV2": "strong", "GEM": "strong", "GEM2": "strong", "GEM3": "strong", "DSX": "strong",
-        "DS": "cheap", "GROQ": "cheap", "DAI": "cheap"}          # providers.json me "tier": "strong"/"cheap" se badal sakte ho
+        "DS": "cheap", "GROQ": "cheap", "DAI": "cheap", "UAI": "cheap"}          # providers.json me "tier": "strong"/"cheap" se badal sakte ho
 SEEKHA_FILE = os.path.join(ROOT, ".mumbai", "seekha.md")
 PREVIEW_DIR = os.path.join(ROOT, ".mumbai", "preview")
 STATE.update(asking=None, answer=None, utype="", goal="", criteria=[], strong_n=0)
@@ -5660,7 +5715,7 @@ function drawPlan(){if(!planBox)return;var done=planBox.items.filter(function(x)
 function toggleMenu(ev){ev.stopPropagation();var m=document.getElementById('menu');m.style.display=m.style.display=='block'?'none':'block'}
 function mnu(a){document.getElementById('menu').style.display='none';if(a=='conf')openConf();else if(a=='files')openFiles();else actPost(a)}
 document.addEventListener('click',function(){var m=document.getElementById('menu');if(m)m.style.display='none'});
-var NOISE=/(HTTP\s?\d{3}|\b429\b|rate.?limit|bheed|aaram|ruk ke dobara|org_\w+|cooldown)/i,PROV=/^(JAAT|GEM\d?|GROQ|DS|NV2|DAI)\b/;
+var NOISE=/(HTTP\s?\d{3}|\b429\b|rate.?limit|bheed|aaram|ruk ke dobara|org_\w+|cooldown)/i,PROV=/^(JAAT|GEM\d?|GROQ|DS|NV2|DAI|UAI)\b/;
 var act=null,actBody=null,actN=0,lastAi=null,doneShown=false,stopping=false,curLevel=0,curPlan=[0,0];
 function actBox(){if(!act){act=el('details','step act');act.appendChild(el('summary',null,'Kaam chal raha hai'));actBody=el('div','actb');act.appendChild(actBody);actN=0;chat.appendChild(act)}return actBody}
 function actSay(t){if(!act)return;actN++;act.firstChild.textContent=t+(actN>1?'  \u00b7  '+actN+' kadam':'')}
@@ -6213,10 +6268,10 @@ def setup():
 CODE_FLOW = _env("CODE_FLOW", "1") != "0"        # 0 = purana flow
 SCAN_ON_CHECK = True                             # code/android me review har @@EDIT par nahi, file poori hone par (@@CHECK / @@DONE)
 EXAM_PREF = ("JAAT", "GEM", "GROQ", "GEM2", "GEM3", "DS")   # task dekhne wale (pehle 2 jo jawab dein)
-PLANNER_PREF = ("DSX", "JAAT", "GROQ", "DS", "NV2", "DAI")   # plan banane wale 3
+PLANNER_PREF = ("DSX", "JAAT", "GROQ", "DS", "NV2", "DAI", "UAI")   # plan banane wale 3
 MERGER_PREF = ("DSX", "GEM", "GEM2", "GEM3", "JAAT")       # plan jodne wala: Gemini
 SCAN_PREF = ("JAAT", "GROQ")                        # poori file wale scanner (2): JAAT, Groq. DS alag (bade prompt par tukdon me). NV2/DAI sirf tab jab DS bhi na ho
-SCAN_BACKUP = ("NV2", "DAI")
+SCAN_BACKUP = ("NV2", "DAI", "UAI")
 DS_PARTS_MAX = 6                                      # DS badi file ke itne tukde tak scan karta hai
 GEM_BIG_CHARS = 4000                                # Gemini sirf badi file par (ya aakhri @@DONE scan me)
 QUICK_MIN_LINES, QUICK_MAX = 40, 8                 # bade @@WRITE/@@EDIT par halka Groq scan (salah ki tarah, @@CHECK nahi rokta)
@@ -8884,8 +8939,8 @@ def run_agent(task):
 VERSION = "5.6"
 ASK_WAIT = float(_env("ASK_WAIT", "600"))                           # user ke jawab ka intezaar 10 min (phir 3 AI faisla karte hain)
 ASK_FIRST = _env("ASK_FIRST", "1") != "0"                           # 0 = naye kaam par shuru ke sawal band
-CHAT_PREF = ("GROQ", "DS", "DAI", "NV2")                            # sirf baat: JAAT KABHI NAHI
-STUDY_PREF = ("GROQ", "DS", "DAI", "NV2")                           # padhai / GK sawal: Gemini NAHI (uski limit bachao): Groq, DS, DeepAI, NV2
+CHAT_PREF = ("GROQ", "DS", "DAI", "UAI", "NV2")                            # sirf baat: JAAT KABHI NAHI
+STUDY_PREF = ("GROQ", "DS", "DAI", "UAI", "NV2")                           # padhai / GK sawal: Gemini NAHI (uski limit bachao): Groq, DS, DeepAI, NV2
 TRIAGE_PREF = ("GEM2", "GEM", "GEM3", "GROQ", "DS", "NV2")          # dikkat/photo dekhne wala: Gemini fast (GEM2 think=0 pehle)
 QA_PREF = ("GROQ", "NV2", "GEM", "GEM2", "GEM3")                   # project ke sawal: pehle Groq/NV2, Gemini sirf backup
 EXPLAIN_PREF = ("GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2")         # setup samjhana / project ke sawal: JAAT nahi
