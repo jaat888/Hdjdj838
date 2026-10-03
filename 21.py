@@ -138,6 +138,14 @@ APIS = {
     },
 }
 
+# ---- bada jawab (token) + image dekhna: JAAT aur Gemini (conf se badal sakte ho) ----
+for _n, _tok in (("JAAT", 32000), ("GEM", 60000), ("GEM2", 60000), ("GEM3", 60000)):
+    if _n in APIS:
+        APIS[_n].setdefault("max_tokens", _tok)
+        APIS[_n]["total_timeout"] = max(APIS[_n].get("total_timeout", 0), 600)   # lamba jawab beech me na kate
+        APIS[_n].setdefault("vision", APIS[_n]["models"][0])                     # image dekhne ke liye wahi model
+VISION_PREF = ("GEM", "GEM2", "GEM3", "JAAT", "NV2")                               # image: pehle Gemini, phir JAAT, phir NV2
+
 DEFAULT_APIS = copy.deepcopy(APIS)
 DEFAULT_PRIORITY = list(PRIORITY)
 
@@ -147,7 +155,7 @@ BIND = os.environ.get("BIND") or "0.0.0.0"
 MAX_STEPS = 1000          # ek kaam me itne kadam
 REPEAT_WAIT, REPEAT_WAITS = 15 * 60, 3   # atakne par 15 min ruko (max 3 baar), phir wahin se chalo
 REPEAT_MAX = 15           # lagatar wahi command itni baar aaye tab kaam rokna (beech me har 3 baar par AI badalta hai)
-MAX_TOKENS = 8000         # AI ke jawab ki lambai (APIS me (19.py ke upar) cfg["max_tokens"] se badal sakte ho)
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS") or 32000)         # AI ke jawab ki lambai (APIS me (19.py ke upar) cfg["max_tokens"] se badal sakte ho)
 RUN_TIMEOUT = 120         # @@RUN kitni der tak
 MAX_UPLOAD = 25 * 1024 * 1024
 UA = "Mozilla/5.0 (Linux; Android 13; Mumbai) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
@@ -235,7 +243,7 @@ Kaam ho to in commands se karo. Har command nayi line par sirf @@NAAM se shuru h
 @@VERIFY                 project ki jaanch: syntax, XML, gradle, Android resources/manifest. Galtiyan list karta hai
 @@GREP <text>            saari files me text dhundho
 @@LS <folder>            ek folder ki list
-@@READ <file> [a-b]      file padho (badi file ho to line range, jaise: @@READ app.py 100-220). zip, tar/gz, docx, xlsx, pptx, pdf aur image (size) bhi padh leta hai\n@@UNZIP <file> [folder]  zip / tar / tgz / gz kholo\n@@SEARCH <sawal>         internet search (top 8 natije: title, link, saar). Phir kaam ka link @@WEB se padho\n@@NOTIFY <message>     user ke phone par message (kaam bahut lamba ho ya user ki zaroorat ho tab)\n@@WEB <https link>       web page ka text padho (sirf padhna; local/private address band). Library ka naya version ya docs dekhne ko
+@@READ <file> [a-b]      file padho (badi file ho to line range, jaise: @@READ app.py 100-220). zip, tar/gz, docx, xlsx, pptx, pdf aur image (Gemini/JAAT se andar ka text aur dikhawat) bhi padh leta hai\n@@UNZIP <file> [folder]  zip / tar / tgz / gz kholo\n@@SEARCH <sawal>         internet search (top 8 natije: title, link, saar). Phir kaam ka link @@WEB se padho\n@@NOTIFY <message>     user ke phone par message (kaam bahut lamba ho ya user ki zaroorat ho tab)\n@@WEB <https link>       web page ka text padho (sirf padhna; local/private address band). Library ka naya version ya docs dekhne ko
 @@WRITE <file>           NAYI file, poora content, aakhir me @@END alag line par. Naam .pdf / .docx / .xlsx ho to asli file banti hai: body me "# bada heading", "## chhota heading", "- bullet", baaki paragraph (xlsx me har line ek row, comma se alag, "=SUM(A1:A3)" jaisa formula bhi chalta hai)
 @@EDIT <file>            purani file me badlav, neeche wale format me, aakhir me @@END
 @@WRITEB64 <file>        binary file (chhoti image wagairah), body base64, aakhir me @@END
@@ -271,7 +279,7 @@ Udaharan:
 SYSTEM_MINI = """Tum Mumbai ho, coding assistant. Hinglish me chhota bolo. Sirf baat/sawal ho to seedha jawab do. Kaam ho to commands (har command nayi line par @@ se):
 @@WRITE <file>  (content, aakhir me @@END alag line par)
 @@EDIT <file>  (<<<<<<< SEARCH / ======= / >>>>>>> REPLACE, aakhir me @@END)
-@@READ <file> <a-b>  (badi file ho to chhoti line range, jaise @@READ f.kt 1-60)   @@LS <dir>   @@TREE   @@GREP <text>   @@RUN <cmd>   @@VERIFY (project jaanch)   @@NOTE <ek line>   @@LEARN <sabak>   @@ASK <sawal>   @@LOOK <file.pdf>   @@CHECK <n>   @@DONE <saar>
+@@READ <file> <a-b>  (badi file ho to chhoti line range, jaise @@READ f.kt 1-60)   @@LS <dir>   @@TREE   @@GREP <text>   @@RUN <cmd>   @@VERIFY (project jaanch)   @@NOTE <ek line>   @@LEARN <sabak>   @@ASK <sawal>   @@LOOK <file.pdf ya image> [sawal]   @@CHECK <n>   @@DONE <saar>
 Neeche PLAN dikhe to ek-ek kadam karo, har kadam ke baad @@CHECK n. Saare kadam ✅ hone par hi @@DONE.
 @@DONE akela likho, @@VERIFY/RUN ka natija dekh ke. Test/build kadam @@VERIFY saaf aane par hi @@CHECK. Chhoti chhoti files likho. Ek reply me sirf EK command do aur uska natija dekh ke hi agla do. Jo file ka hissa padh chuke ho use dobara mat padho; natija kata ho to agli line range padho."""
 
@@ -777,7 +785,48 @@ def _err_text(o):
     return ""
 
 
-def read_reply(r, total):
+def cancellable(fn):
+    """fn(dead) ko alag thread me chalata hai. Stop dabte hi TURANT Cancelled uthata hai (server ka jawab aane ka intezaar nahi).
+    Der se aaya jawab fenk diya jata hai, chat me kabhi nahi aata."""
+    box, done, dead = {}, threading.Event(), threading.Event()
+
+    def work():
+        try:
+            box["res"] = fn(dead)
+        except BaseException as e:
+            box["err"] = e
+        finally:
+            done.set()
+    threading.Thread(target=work, daemon=True).start()
+    while not done.wait(0.2):
+        if STATE["cancel"]:
+            dead.set()
+            raise Cancelled()
+    if dead.is_set():
+        raise Cancelled()
+    if "err" in box:
+        raise box["err"]
+    return box["res"]
+
+
+def stream_call(cfg, model, body, total):
+    def job(dead):
+        r = None
+        try:
+            r = upstream(cfg, model, body)
+            if dead.is_set():
+                raise Cancelled()
+            return read_reply(r, total, dead)
+        finally:
+            try:
+                if r is not None:
+                    r.close()
+            except Exception:
+                pass
+    return cancellable(job)
+
+
+def read_reply(r, total, dead=None):
     """(jawab, finish_reason). Stream ho to tukde jodta hai; timeout sirf 'kuch nahi aaya' par lagta hai."""
     LAST_RAW[0] = ""
     if "event-stream" not in r.headers.get("Content-Type", ""):
@@ -791,7 +840,7 @@ def read_reply(r, total):
             return "", None
     parts, fin, t0, extra = [], None, time.time(), []
     for raw in r:
-        if STATE["cancel"]:
+        if STATE["cancel"] or (dead is not None and dead.is_set()):
             raise Cancelled()
         if time.time() - t0 > total:
             raise IOError("bahut der lagi (%ds)" % total)
@@ -859,7 +908,7 @@ def ask_oai(name, cfg, msgs):
                 body["stream"] = True
             try:
                 with slot(name):
-                    out, fin = read_reply(upstream(cfg, model, body), cfg.get("total_timeout", 300))
+                    out, fin = stream_call(cfg, model, body, cfg.get("total_timeout", 300))
                 if out.strip():
                     return out, fin == "length"
                 saw_empty, empty_n = True, empty_n + 1
@@ -959,8 +1008,11 @@ def ask_plain(name, cfg, msgs):
     out = ""
     for scale in (1.0, 0.5):
         try:
-            out = PLAIN[cfg["type"]](cfg, models_of(cfg)[0], plain_prompt(cfg, msgs, scale))
+            _txt = plain_prompt(cfg, msgs, scale)
+            out = cancellable(lambda dead: PLAIN[cfg["type"]](cfg, models_of(cfg)[0], _txt))
             break
+        except Cancelled:
+            return None
         except urllib.error.HTTPError as e:
             if e.code in (413, 414) and scale == 1.0:
                 ev("note", text="%s: HTTP %s (prompt lamba), chhota karke dobara" % (name, e.code))
@@ -1025,7 +1077,7 @@ def ask(msgs, role="write"):
 
 
 # ================= FORMATS: har type ki file padho/banao (sirf stdlib; pypdf ho to PDF padhne me wo bhi) =================
-CONVERT_EXT = (".zip", ".docx", ".pptx", ".xlsx", ".pdf", ".tar", ".tgz", ".gz", ".png", ".jpg", ".jpeg", ".gif", ".odt")
+CONVERT_EXT = (".zip", ".docx", ".pptx", ".xlsx", ".pdf", ".tar", ".tgz", ".gz", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".odt")
 MAKE_EXT = (".pdf", ".docx", ".xlsx")
 FMT_MAX = 12000
 
@@ -1212,7 +1264,7 @@ def read_any(path, raw):
         return None
     try:
         if ext in (".png", ".jpg", ".jpeg", ".gif"):
-            return _img_info(raw, ext) + "\n(image ka andar dekha nahi ja sakta; sirf size ki jaankari)"
+            return look_image(path, raw) or _img_info(raw, ext)
         if ext == ".pdf":
             return _read_pdf(raw, path)
         if ext == ".gz" and not path.lower().endswith(".tar.gz"):
@@ -1341,9 +1393,13 @@ def do_web(arg):
     if not _public_host(u.hostname):
         return "ERROR: ye address private/local hai, allowed nahi", False, False, None
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/html,application/json,text/plain,*/*"})
-    with urllib.request.build_opener(_SafeRedirect).open(req, timeout=25) as r:
-        ctype = r.headers.get("Content-Type", "")
-        raw = r.read(2 * 1024 * 1024)
+    def _fetch(dead):
+        with urllib.request.build_opener(_SafeRedirect).open(req, timeout=25) as r:
+            return r.headers.get("Content-Type", ""), r.read(2 * 1024 * 1024)
+    try:
+        ctype, raw = cancellable(_fetch)
+    except Cancelled:
+        return "⏹ roka gaya", False, False, None
     if not re.search(r"text|json|xml|javascript", ctype, re.I) and b"\0" in raw[:2000]:
         return "(%s, %d bytes: ye text nahi hai, padha nahi gaya)" % (ctype or "binary", len(raw)), False, True, None
     text = raw.decode("utf-8", "replace")
@@ -1553,15 +1609,25 @@ def do_search(q):
     if bk:                                   # Brave Search API (free plan), sabse bharosemand
         req = urllib.request.Request("https://api.search.brave.com/res/v1/web/search?" + urllib.parse.urlencode({"q": q, "count": 8}),
                                      headers={"Accept": "application/json", "X-Subscription-Token": bk, "User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=25) as r:
-            j = json.loads(r.read().decode("utf-8", "replace"))
+        def _brave(dead):
+            with urllib.request.urlopen(req, timeout=25) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        try:
+            j = cancellable(_brave)
+        except Cancelled:
+            return "⏹ roka gaya", False, False, None
         for x in (j.get("web") or {}).get("results", [])[:8]:
             res.append((_strip_tags(x.get("title")), x.get("url", ""), _strip_tags(x.get("description"))))
     else:                                    # bina key: DuckDuckGo ka html page
         req = urllib.request.Request("https://html.duckduckgo.com/html/", urllib.parse.urlencode({"q": q}).encode(),
                                      {"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded"})
-        with urllib.request.urlopen(req, timeout=25) as r:
-            page = r.read(1500000).decode("utf-8", "replace")
+        def _ddg(dead):
+            with urllib.request.urlopen(req, timeout=25) as r:
+                return r.read(1500000).decode("utf-8", "replace")
+        try:
+            page = cancellable(_ddg)
+        except Cancelled:
+            return "⏹ roka gaya", False, False, None
         links = [(m.group(0), m.end()) for m in re.finditer(r"<a\b[^>]*result__a[^>]*>.*?</a>", page, re.S)]
         for i, (a, end) in enumerate(links[:8]):
             h = re.search(r'href="([^"]+)"', a)
@@ -2940,7 +3006,7 @@ def run_review(rel, writer):
 # ================= 8.py: SPEC -> chhota part -> jaanch -> reviewer(JSON) -> fix-loop -> final saboot =================
 SPEC_GATE, REVIEW_LOOP = True, True
 SPEC_REJECT_MAX, REVIEW_ROUNDS, FINAL_REJECT_MAX = 4, 3, 4
-REVIEWER_TRIES, REVIEWER_TIMEOUT, REVIEWER_TOKENS = 3, 300, 6000
+REVIEWER_TRIES, REVIEWER_TIMEOUT, REVIEWER_TOKENS = 3, 300, 16000
 REVIEWER_PREF = "JAAT"
 REVIEW_GEMINI = True    # review me Gemini bhi, par sabse LAST me (baari-baari); pehle JAAT, Groq, NV2, DS chalte hain taaki Gemini ka limit kam kharch ho
 REVIEW_EXT = (".kt", ".java", ".py", ".js", ".ts", ".go", ".rs", ".c", ".cpp", ".xml", ".html", ".css", ".kts", ".gradle")
@@ -3245,7 +3311,9 @@ def ask_review(name, cfg, system, user):
         log("⏭ review: %s ke liye prompt bada (%d char)" % (name, len(text)))
         return None
     try:
-        out = PLAIN[cfg["type"]](cfg, models_of(cfg)[0], text)
+        out = cancellable(lambda dead: PLAIN[cfg["type"]](cfg, models_of(cfg)[0], text))
+    except Cancelled:
+        return None
     except Exception as e:
         ev("note", text="%s review fail: %s" % (name, str(e)[:80]))
         penalize(name, 90)
@@ -4253,6 +4321,8 @@ def agent(task):
         log(traceback.format_exc())
         ev("err", text="❌ andar ki galti: %s: %s" % (type(e).__name__, str(e)[:200]))
     finally:
+        if STATE["cancel"]:
+            STATE["pending"].clear()
         STATE["running"] = False
         STATE["asking"] = None
         trim()
@@ -4282,7 +4352,10 @@ def run_agent(task):
         if STATE["cancel"]:
             ev("note", text="⏹ roka gaya")
             return
-        add("user", task + samajh + (("\n[" + tip + "]") if tip else ""))
+        add("user", task + samajh + (("\n[" + tip + "]") if tip else "") +
+            ("\n[KAAM YAAD RAKHO: user ne ye maanga hai: %s. Hello/'kaise madad karoon' mat likho, seedha kaam shuru karo.]" % task[:400]
+             if STATE.get("utype") in ("code", "android") or build_intent(task) else ""))
+    offtask = 0
     acted, dirty, last_fail, nudges = 0, False, False, 0
     wrote, verified, zip_made, zip_stale = False, False, False, False
     rej = {"done": 0, "verify": 0, "fail": 0, "plan": 0, "lint": 0, "zip": 0, "check": 0, "bugchk": 0, "specmin": 0, "specrev": 0, "planmin": 0}
@@ -4327,6 +4400,13 @@ def run_agent(task):
         name, reply, cut = got
         STATE["prov"] = name
         reply = clean_reply(reply)
+        _c0, _p0 = parse(reply)
+        if (not _c0 and not acted and offtask < 3 and len(reply) < 500 and "@@" not in reply
+                and (STATE.get("utype") in ("code", "android") or build_intent(task)) and not is_continue(task)):
+            offtask += 1                     # kaam ki jagah 'Hello! kaise madad karoon' jaisa jawab: usse mat maano
+            penalize(name, 180)
+            ev("note", text="↷ %s ne kaam ka jawab nahi diya (%s), agle AI se kara raha hoon (%d/3)" % (name, reply.strip()[:40].replace("\n", " "), offtask))
+            continue
         add("assistant", reply)
         cmds, prose = parse(reply)
         need_read = bool(not cmds and not acted and readnudge < 2 and ANALYZE_RE.search(STATE["task"] or task)
@@ -5011,30 +5091,81 @@ def _pdf_text_pages(p):
         return None
 
 
+IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+_IMG_CACHE = {}
+
+
+def vision_ask(prompt, images, max_tokens=1500):
+    """images = [(mime, bytes)]. (text, provider) ya (None, None). Pehle Gemini, phir JAAT, phir NV2. Stop par turant."""
+    content = [{"type": "text", "text": prompt}]
+    for mime, raw in images[:3]:
+        content.append({"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode())}})
+    tried = []
+    for nm in list(VISION_PREF) + [n for n in order() if n not in VISION_PREF]:
+        if STATE["cancel"]:
+            return None, None
+        cfg = APIS.get(nm)
+        if not cfg or cfg["type"] != "oai" or not ready(nm) or nm in tried or COOL.get(nm, 0) > time.time():
+            continue
+        model = cfg.get("vision") or (models_of(cfg) or [None])[0]
+        if not model:
+            continue
+        tried.append(nm)
+        body = {"messages": [{"role": "user", "content": content}], "max_tokens": max_tokens, "temperature": 0.2}
+
+        def job(dead, cfg=cfg, model=model, body=body, nm=nm):
+            with slot(nm):
+                r = upstream(cfg, model, body, timeout=120)
+                try:
+                    return json.loads(r.read().decode("utf-8", "replace"))
+                finally:
+                    r.close()
+        try:
+            j = cancellable(job)
+            t = ((j.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
+            if t:
+                return t, nm
+        except Cancelled:
+            return None, None
+        except Exception as e:
+            log("vision %s fail: %s" % (nm, str(e)[:80]))
+            ev("note", text="👁 %s image nahi dekh paya, agla AI (%s)" % (nm, str(e)[:60]))
+    return None, None
+
+
+def look_image(path, raw, ask_text=None):
+    """Image ke andar ki cheez (text, error, UI) Gemini/JAAT se padhta hai. Text lautata hai."""
+    ext = os.path.splitext(path)[1].lower()
+    mime = IMG_MIME.get(ext)
+    if not mime:
+        return None
+    key = (path, len(raw), ask_text or "")
+    if key in _IMG_CACHE:
+        return _IMG_CACHE[key]
+    info = _img_info(raw, ext)
+    if len(raw) > 7 * 1024 * 1024:
+        return info + "\n(image 7MB se badi hai, AI ko nahi bheji; chhoti karke dobara do)"
+    prompt = ask_text or ("Describe this image for a coding assistant. First transcribe ALL visible text exactly (error messages, logs, code, "
+                          "button labels, numbers) in a block, then describe the layout/UI and anything wrong. Be precise, no guessing.")
+    txt, prov = vision_ask(prompt, [(mime, raw)])
+    if not txt:
+        return info + "\n(image AI se dekhi nahi ja saki: koi vision AI chala nahi. Gemini/JAAT ka cooldown ya key dekho)"
+    out = "%s\nAI-ankh (%s):\n%s" % (info, prov, txt)
+    _IMG_CACHE[key] = out
+    if len(_IMG_CACHE) > 40:
+        _IMG_CACHE.pop(next(iter(_IMG_CACHE)))
+    return out
+
+
 def _vision_look(pngs, name_hint):
     prompt = ("These are page images of a generated PDF (%s). Check LAYOUT only: text cut off or overlapping, big empty areas, broken headings/bullets, "
               "'?' or boxes instead of letters, margins. Answer in max 5 short lines: start with OK or PROBLEM, then what is wrong." % name_hint)
-    for nm in order():
-        cfg = APIS[nm]
-        v = cfg.get("vision")
-        if not (v and cfg["type"] == "oai" and ready(nm)):
-            continue
-        try:
-            content = [{"type": "text", "text": prompt}]
-            for pth in pngs[:2]:
-                with open(pth, "rb") as f:
-                    content.append({"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(f.read()).decode()}})
-            body = {"model": v, "messages": [{"role": "user", "content": content}], "max_tokens": 400, "temperature": 0.2}
-            req = urllib.request.Request(cfg["base"].rstrip("/") + "/chat/completions", json.dumps(body).encode(),
-                                         {"Content-Type": "application/json", "Authorization": "Bearer " + cfg["key"], "User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=90) as r:
-                j = json.loads(r.read().decode("utf-8", "replace"))
-            t = (j["choices"][0]["message"]["content"] or "").strip()
-            if t:
-                return t[:700], nm
-        except Exception as e:
-            log("vision %s fail: %s" % (nm, str(e)[:80]))
-    return None, None
+    imgs = []
+    for pth in pngs[:2]:
+        with open(pth, "rb") as f:
+            imgs.append(("image/png", f.read()))
+    t, nm = vision_ask(prompt, imgs, max_tokens=600)
+    return (t[:700], nm) if t else (None, None)
 
 
 def do_look(arg):
@@ -5044,8 +5175,13 @@ def do_look(arg):
     p = safe(parts[0])
     if not os.path.isfile(p):
         return "ERROR: file nahi mili: %s" % parts[0], False, False, None
+    if os.path.splitext(p)[1].lower() in IMG_MIME:
+        with open(p, "rb") as f:
+            _raw = f.read()
+        _q = " ".join(parts[1:]) or None
+        return (look_image(p, _raw, _q) or "ERROR: image nahi padhi"), False, True, None
     if not p.lower().endswith(".pdf"):
-        return "ERROR: @@LOOK abhi sirf PDF ke liye hai (.pdf)", False, False, None
+        return "ERROR: @@LOOK sirf PDF ya image (png/jpg/webp/gif) ke liye hai", False, False, None
     if not look_ok():
         return "ERROR: PDF image banane ka tool (pdftoppm / poppler-utils) nahi hai. Dockerfile me poppler-utils jodo. Tab tak @@READ file.pdf se text dekho.", False, False, None
     rel = os.path.relpath(p, WORK)
@@ -5392,7 +5528,7 @@ function drawPlan(){if(!planBox)return;var done=planBox.items.filter(function(x)
  planBox.items.forEach(function(x){x.d.textContent=(x.ok?'\u2713  ':'\u25CB  ')+x.t;x.d.className='it'+(x.ok?' ok':'')});
  if(done==n&&n)planBox.c.open=false}
 function toggleMenu(ev){ev.stopPropagation();var m=document.getElementById('menu');m.style.display=m.style.display=='block'?'none':'block'}
-function mnu(a){document.getElementById('menu').style.display='none';if(a=='conf')openConf();else if(a=='files')openFiles();else act(a)}
+function mnu(a){document.getElementById('menu').style.display='none';if(a=='conf')openConf();else if(a=='files')openFiles();else actPost(a)}
 document.addEventListener('click',function(){var m=document.getElementById('menu');if(m)m.style.display='none'});
 var NOISE=/(HTTP\s?\d{3}|\b429\b|rate.?limit|bheed|aaram|ruk ke dobara|org_\w+|cooldown)/i,PROV=/^(JAAT|GEM\d?|GROQ|DS|NV2|DAI)\b/;
 var act=null,actBody=null,actN=0,lastAi=null,doneShown=false,stopping=false,curLevel=0,curPlan=[0,0];
@@ -5455,7 +5591,7 @@ function poll(){if(polling)return;polling=true;
  }).catch(function(){}).then(function(){polling=false;if(redo){redo=false;poll()}})}
 setInterval(poll,1000);poll();
 function post(p,b){return fetch(p,{method:'POST',body:JSON.stringify(b||{})})}
-function act(p){post(p).then(poll)}
+function actPost(p){post(p).then(poll)}
 function act2(p,b){return post(p,b).then(function(r){if(!r.ok)return r.text().then(function(t){alert(t)})}).catch(function(e){alert('Server se baat nahi hui: '+e.message)})}
 function sendIcon(){var v=document.getElementById('t').value.trim();var sb=document.getElementById('send'),st=running&&!v;sb.textContent=st?(stopping?'⏳':'✕'):'➤';sb.classList.toggle('stop',st);sb.classList.toggle('busy',st&&stopping)}
 function askStop(){var d=document.getElementById('cfm'),p=curPlan;
@@ -5703,8 +5839,13 @@ class H(BaseHTTPRequestHandler):
             return self.proxy(body)
         if p == "/stop":
             STATE["cancel"] = True
+            STATE["pending"].clear()          # beech me queue kiye message bhi nahi chalenge
             kill_proc()
-            ev("note", text="Ruk raha hoon...")
+            t_stop = time.time()
+            while STATE["running"] and time.time() - t_stop < 5:      # agent thread nikalne tak ruko (ab turant nikalta hai)
+                time.sleep(0.1)
+            STATE["asking"] = None
+            ev("note", text="⏹ roka gaya" if not STATE["running"] else "Ruk raha hoon...")
         elif p == "/undo":
             _m = do_undo()
             if not _m.startswith("⏳") or busy_note_ok():
@@ -6588,7 +6729,7 @@ if LEAN:
         _p.update(spec_min=0, plan_min=0, need_spec=False, spec_review=False, check_review=False, flow=False, polish=False)
     MAX_BODY_LINES = int(_env("MAX_BODY_LINES", "400"))
     DOC_BODY_LINES = 400
-    MAX_TOKENS = int(_env("MAX_TOKENS", "16000"))
+    MAX_TOKENS = int(_env("MAX_TOKENS", "32000"))
     REPEAT_MAX, REPEAT_WAIT = 6, 60
     SYSTEM = SYSTEM.replace("120 line tak (.pdf/.docx/.md/.txt me 120)", "400 line tak") + NEW_RULES
 
