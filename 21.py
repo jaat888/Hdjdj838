@@ -3941,8 +3941,10 @@ def run_cmd(k, a, body="", complete=True):
         if k == "NOTIFY":
             return do_notify(a)
         if k == "NOTE":
+            if ("- " + a) in _read("PROJECT.md"):
+                return "ye note pehle se PROJECT.md me hai. Dobara mat likho: agla kadam karo, ya jawab chat me likho / @@DONE.", False, True, None
             append_pm(["- " + a])
-            return "PROJECT.md me likha", False, True, None
+            return "PROJECT.md me likha. NOTE jawab dene ke liye nahi hai: ab agla kadam karo ya jawab chat me likho.", False, True, None
         if k == "LEARN":
             TRACK["learned"] = True
             return ("seekha me likha (har project me yaad rahega)" if seekha_add(a) else "ye sabak pehle se likha hai"), False, True, None
@@ -4365,7 +4367,8 @@ def run_agent(task):
                 ev("err", text="⚠ AI teen baar bhi sahi command nahi de paya, kaam ruk gaya. 'aage badho' likh ke dobara chalao.")
             return          # sirf baat thi, jawab upar dikh chuka hai
         nudges = 0          # command mile, ginti dobara shuru
-        sig = tuple((k, a, b) for k, a, b, _ in cmds if k not in CTL)
+        sig = tuple((k, a, b) for k, a, b, _ in cmds if k not in CTL) or tuple(
+            (k, a, "") for k, a, _b, _ in cmds if k in ("NOTE", "LEARN", "CHECK"))
         repeat = repeat + 1 if sig and sig == last_sig else 1
         last_sig = sig
         if repeat >= REPEAT_MAX:
@@ -6560,6 +6563,75 @@ def done_gate():
         if openb:
             return "DONE mana: reviewer ke bug khule hain, pehle inhe theek karo:\n" + bug_text(openb)
     return _done_gate_orig()
+
+
+# ================= 22.py: asli AI sahayak (kam gate, zyada kaam, pehle research) =================
+# LEAN=0 environment me do to purana poora gate/reviewer flow wapas. ASK_USER=1 do to sawal poochna wapas.
+VERSION = "5.2"
+LEAN = _env("LEAN", "1") != "0"
+NEW_RULES = """
+NAYE NIYAM (inhe sabse upar maano):
+A. Tum asli AI sahayak ho, command-bot nahi. User ka maqsad samjho aur sawal mat poochho: tech stack, hosting, chhote faisle khud lo. User kahe "mujhe nahi pata" to faisla tumhara.
+B. Naya app/bot/site banane ya library/tool/hosting chunne se pehle 1-2 baar @@SEARCH karo (abhi latest kya chal raha hai, kya free hai) aur sirf wahi chuno jo abhi sach me chal raha ho. Purani yaad par bharosa mat karo.
+C. Jab tak user alag na bole, FREE service par chalne layak banao: kam dependency, ek hi service par chale, keys/token environment variable me.
+D. Seedha kaam karo: bade @@WRITE (300-400 line tak) ek baar me. Wahi file baar-baar @@READ mat karo. SPEC/PLAN sirf bade kaam me, aur chhota. @@NOTE jawab dene ke liye nahi hai.
+E. @@DONE ke saar me user se seedhi baat, saaf Hinglish me: kya bana, kaise chalana hai (steps), aur kahan FREE me host karein (kaun si service, kaise deploy, kya dhyan rakhna).
+F. Sirf wahi banao jo user ne maanga. Ek cheez maangi to doosra project ya extra feature mat banao.
+"""
+if LEAN:
+    READ_FIRST, REVIEW = False, False                 # file dobara padhne ki zabardasti band
+    SPEC_GATE = REVIEW_LOOP = False                   # reviewer / SPEC / aakhri review: extra AI calls band
+    SCAN_ON_CHECK = CODE_FLOW = False                 # 2 AI examine + 3 AI plan + 4 AI scan band
+    SPLIT_ROLES = False                               # likhna chhote model se nahi: JAAT pehle, phir Gemini
+    LIGHT_PREF = ("JAAT", "GEM", "GEM2", "GEM3")
+    for _p in PROFILES.values():
+        _p.update(spec_min=0, plan_min=0, need_spec=False, spec_review=False, check_review=False, flow=False, polish=False)
+    MAX_BODY_LINES = int(_env("MAX_BODY_LINES", "400"))
+    DOC_BODY_LINES = 400
+    MAX_TOKENS = int(_env("MAX_TOKENS", "16000"))
+    REPEAT_MAX, REPEAT_WAIT = 6, 60
+    SYSTEM = SYSTEM.replace("120 line tak (.pdf/.docx/.md/.txt me 120)", "400 line tak") + NEW_RULES
+
+_ask_user_prev, _do_understand_prev, _done_gate_prev = ask_user, do_understand, done_gate
+_scan_prev, _hook_prev = scan_dirty_files, review_hook
+
+
+def ask_user(question, options=None, ctx=""):
+    """LEAN me user se sawal nahi: na intezaar, na 3-AI council (token bachte hain). Agent khud tay karta hai."""
+    if not LEAN or _env("ASK_USER") == "1":
+        return _ask_user_prev(question, options, ctx)
+    ev("note", text="sawal chhod diya, khud tay kar raha hoon: " + (question or "")[:80])
+    return ("User ko tech ki jaankari nahi, faisla tumhara. Sabse saada raasta lo jo FREE service par chal sake "
+            "(pehle @@SEARCH se latest free options dekho), ek line @@NOTE me likho aur seedha kaam shuru karo."), "council"
+
+
+def do_understand(task):
+    if LEAN:
+        STATE["level"] = 0
+    return _do_understand_prev(task)
+
+
+def done_gate():
+    return pdf_gate() if LEAN else _done_gate_prev()
+
+
+def scan_dirty_files():
+    if not LEAN:
+        return _scan_prev()
+
+
+def review_hook(rel, writer=None):
+    return "" if LEAN else _hook_prev(rel, writer)
+
+
+_mode_note_prev = mode_note
+
+
+def mode_note(short=False):
+    if not LEAN:
+        return _mode_note_prev(short)
+    return "KAAM KA TYPE: %s - seedha kaam karo. SPEC zaroori nahi; kaam bada ho to chhota @@PLAN (3-6 bade kadam)." % cur_mode()
+
 
 
 if __name__ == "__main__":
