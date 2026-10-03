@@ -47,7 +47,7 @@ APIS = {
         "no_system": True,         # JAAT 'System message must be at the beginning' 400 deta tha: system ko user message me jod do
         "max_conc": 1,
         "min_gap": 1,
-        "rate_cool": 15,           # 429 ke baad sirf 15 sec aaram (lock nahi)
+        "rate_cool": 15,           # 429 ke baad sirf 15 sec aaram (lock nahi). 530 (Cloudflare) par sirf 3 sec ruk ke dobara: ask_oai dekho
         "retry_429": 2,            # 429 par 2 baar ruk ke dobara
     },
     "DSX": {                       # DeepSeek (ab sabse last). Key: environment me DSX_KEY, ya ⚙ se
@@ -256,7 +256,7 @@ nayi lines
 KAISE SOCHO (niyam kam, samajh zyada):
 1. Pehle samjho. AUTO JAANKARI me SAMAJH hoti hai: user ka asli maqsad, kaam ka type aur DONE CRITERIA (kaam kab poora maana jayega). Wahi nishana hai: usse bahar ka kaam mat badhao, usme se kuch chhodo mat.
 2. Banao, phir chala ya padh ke dekho. Bina saboot 'ho gaya' mat bolo. @@DONE hamesha AKELA likho (WRITE/RUN ke saath nahi); saar me har D-criteria ka saboot likho (kaunse @@RUN/@@READ ke natije se). Mumbai ek alag reviewer se ye saboot asli natije se milata hai.
-3. Chhote kadam: ek @@WRITE/@@EDIT me 50 line tak (.pdf/.docx/.md/.txt me 120). Purani file badalni ho to pehle @@READ, phir chhota @@EDIT (SEARCH text file jaisa bilkul waisa); poori file dobara @@WRITE mat karo. @@RUN/@@BG ke baad ruk jao aur natija dekho.
+3. Chhote kadam: ek @@WRITE/@@EDIT me 120 line tak (.pdf/.docx/.md/.txt me 120). Purani file badalni ho to pehle @@READ, phir chhota @@EDIT (SEARCH text file jaisa bilkul waisa); poori file dobara @@WRITE mat karo. @@RUN/@@BG ke baad ruk jao aur natija dekho.
 4. Type ke hisaab se: android/code ke naye kaam me pehle @@SPEC (BEHAVIOUR: user kya dekhe/kare, kahan toot sakta hai: khaali data, galat input, error par message) aur @@PLAN (ek file ya feature = ek kadam, har kadam ke baad @@CHECK n). Kitni lines chahiye wo AUTO JAANKARI me likha hai. light type (document, PDF, notes, likhna, sawal, chhota badlav) me seedha kaam karo: SPEC/PLAN mat likho, Android baatein mat jodo.
 5. Reviewer ya jaanch ne mana kiya to wajah padho aur isi baar sahi karo. Wahi tareeka dohrao mat; 2 baar ke baad bhi na bane to asli jad dhundho aur naya raasta lo. User ki pasand ke bina sach me aage nahi badh sakte to @@ASK; chhote faisle khud lo.
 6. Galti pakdi jaye (reviewer, error ya user se) to theek karne ke baad @@LEARN likho. AUTO JAANKARI ke SEEKHA me jo likha hai wo dobara mat karo.
@@ -838,11 +838,15 @@ SMALL_NUDGE = ("\n\n[Mumbai: pichhla jawab lamba hone se khali gaya. Ab SIRF EK 
                "kam se kam soch-vichar. Reviewer ho to sirf chhota JSON, lambi vyakhya nahi.]")
 
 
+CF530_WAIT, CF530_TRIES = int(_env("CF530_WAIT", "3")), 3        # 530 aaye to itne second ruko, itni baar tak
+
+
 def ask_oai(name, cfg, msgs):
     budget = ctx_limit(name, cfg)
     saw_empty, last_err = False, 0
     for model in models_of(cfg):
         use_mt, use_stream, n429 = True, True, 0
+        n530 = 0                                  # Cloudflare 530: sirf 530 ke baad 3 sec ruko, har request ke baad nahi
         mt, empty_n, shrunk = cfg.get("max_tokens", MAX_TOKENS), 0, False
         for _ in range(8):
             if STATE["cancel"]:
@@ -860,6 +864,12 @@ def ask_oai(name, cfg, msgs):
                     return out, fin == "length"
                 saw_empty, empty_n = True, empty_n + 1
                 ev("note", text="%s/%s: khali jawab (finish=%s, stream=%s). Server ne bheja: %s" % (name, model, fin, use_stream, LAST_RAW[0] or "-"))
+                if re.search(r"\b530\b", (LAST_RAW[0] or "")[:200]) and n530 < CF530_TRIES:
+                    n530 += 1
+                    ev("note", text="%s: Cloudflare 530, %ds ruk ke dobara (%d/%d)" % (name, CF530_WAIT, n530, CF530_TRIES))
+                    if not nap(CF530_WAIT):
+                        return None
+                    continue
                 if fin == "length" and not shrunk:
                     shrunk = True            # token badhane ki jagah kaam chhota karwao
                     msgs = list(msgs)
@@ -889,6 +899,12 @@ def ask_oai(name, cfg, msgs):
                 if rc >= HARD_SECS and (code == 429 or (code in (400, 403) and RATE_RE.search(err_body))):
                     lock(name, rc, "limit (HTTP %s)" % code)      # lock: dobara thokna bekaar
                     return None
+                if code == 530 and n530 < CF530_TRIES:
+                    n530 += 1
+                    ev("note", text="%s: Cloudflare 530, %ds ruk ke dobara (%d/%d)" % (name, CF530_WAIT, n530, CF530_TRIES))
+                    if not nap(CF530_WAIT):
+                        return None
+                    continue
                 if code == 429 and n429 < int(cfg.get("retry_429", 1)):
                     n429, w = n429 + 1, retry_after(e)
                     ev("note", text="%s: 429 (bheed), %.0fs ruk ke dobara (%d/%d)" % (name, w, n429, int(cfg.get("retry_429", 1))))
@@ -2892,7 +2908,7 @@ def run_review(rel, writer):
 
 # ================= 8.py: SPEC -> chhota part -> jaanch -> reviewer(JSON) -> fix-loop -> final saboot =================
 SPEC_GATE, REVIEW_LOOP = True, True
-SPEC_REJECT_MAX, REVIEW_ROUNDS, FINAL_REJECT_MAX = 4, 5, 8
+SPEC_REJECT_MAX, REVIEW_ROUNDS, FINAL_REJECT_MAX = 4, 3, 4
 REVIEWER_TRIES, REVIEWER_TIMEOUT, REVIEWER_TOKENS = 3, 300, 6000
 REVIEWER_PREF = "JAAT"
 REVIEW_GEMINI = True    # review me Gemini bhi, par sabse LAST me (baari-baari); pehle JAAT, Groq, NV2, DS chalte hain taaki Gemini ka limit kam kharch ho
@@ -3461,7 +3477,7 @@ def _final_gate_core():
 
 # ================= 9.py: dohra reviewer, user-flow, polish, size-limit, gradle-gate =================
 REVIEW_PARALLEL, REVIEW_GAP, PAYLOAD_MAX = False, 3, 60000   # reviewer ek-ek karke, beech me 3s, payload 60k char tak
-MAX_BODY_LINES, BODY_REJECT_MAX = 50, 4          # ek @@WRITE/@@EDIT me itni lines tak
+MAX_BODY_LINES, BODY_REJECT_MAX = int(_env("MAX_BODY_LINES", "120")), 4          # ek @@WRITE/@@EDIT me itni lines tak
 SPEC_MIN, PLAN_MIN = 10, 12                      # sirf android ke liye; baaki type ke liye PROFILES dekho
 DOC_BIN_EXT = (".pdf", ".docx", ".xlsx")
 DOC_BODY_EXT = DOC_BIN_EXT + (".md", ".txt", ".csv")
@@ -3513,7 +3529,22 @@ def cur_mode():
     return k
 
 
+SMALL_LEVEL = int(_env("SMALL_LEVEL", "3"))      # itne level tak ka kaam = chhota = tez raasta (0 likho to band)
+
+
+def is_small():
+    """Model ne level <= SMALL_LEVEL bataya aur user ne /code ya /android zabardasti nahi likha."""
+    try:
+        if MODE_FORCE_RE.match(STATE.get("task") or ""):
+            return False
+        return STATE.get("utype") == "code" and 0 < int(STATE.get("level") or 0) <= SMALL_LEVEL
+    except Exception:
+        return False
+
+
 def prof():
+    if is_small():
+        return PROFILES["light"]
     return PROFILES.get(cur_mode()) or PROFILES["code"]
 
 
@@ -3751,7 +3782,7 @@ def size_gate(k, a, body):
         return None
     TRACK["size_rej"][rel] = TRACK["size_rej"].get(rel, 0) + 1
     return ("ROKA: ek @@%s me %d line hain, hadd %d hai. Chhota karo: bada kaam alag files me todo (jaise model, logic, screen/page alag) "
-            "ya pehle chhoti @@WRITE, phir kai chhote @@EDIT (30-50 line). Document ho to alag-alag part files me likho. "
+            "ya pehle chhoti @@WRITE, phir kai chhote @@EDIT (60-120 line). Document ho to alag-alag part files me likho. "
             "Har file ke baad reviewer dekhega." % (k, n, lim))
 
 
@@ -5876,7 +5907,7 @@ def setup():
 # -> Groq har file ka chhota memory card MEMORY.md me rakhe -> aakhir me mismatch jaanch
 CODE_FLOW = _env("CODE_FLOW", "1") != "0"        # 0 = purana flow
 SCAN_ON_CHECK = True                             # code/android me review har @@EDIT par nahi, file poori hone par (@@CHECK / @@DONE)
-EXAM_PREF = ("GROQ", "DS", "GEM", "GEM2", "GEM3")   # task dekhne wale (pehle 2 jo jawab dein)
+EXAM_PREF = ("JAAT", "GEM", "GROQ", "GEM2", "GEM3", "DS")   # task dekhne wale (pehle 2 jo jawab dein)
 PLANNER_PREF = ("JAAT", "GROQ", "DS", "NV2", "DAI")   # plan banane wale 3
 MERGER_PREF = ("GEM", "GEM2", "GEM3", "JAAT")       # plan jodne wala: Gemini
 SCAN_PREF = ("JAAT", "GROQ")                        # poori file wale scanner (2): JAAT, Groq. DS alag (bade prompt par tukdon me). NV2/DAI sirf tab jab DS bhi na ho
@@ -5947,6 +5978,7 @@ EXAM_SYS = ("You examine ONE task from a user of a phone coding/document assista
             "chat = just talking or a simple question (then done=[]). "
             "level = size and difficulty from 1 to 10 (1 = tiny single file of 50-100 lines, 3 = 200-400 lines, 5 = 700-1000 lines over 4 files, "
             "8 = 2500-4000 lines, 10 = very large 6000+ lines). Light and chat tasks are level 1. "
+            "Never ask about a language or platform the user already named; Cloudflare Worker means JavaScript and deploy with wrangler, not Render or Docker. "
             "A simple single-purpose bot, worker, script or small tool is level 2 or 3 (only a big multi-screen app is 4 or more). "
             "Each done item must be checkable by reading a file or running a command. "
             "questions: ONLY for code/android, max 3, ONLY choices the user did NOT already state: programming language or framework, "
@@ -5986,13 +6018,21 @@ def examine_task(task):
     """(dict, [providers]) ya None. 2 AI ke jawab jode: type, level, goal, done, questions."""
     user = "TASK:\n%s\n\nFILES: %s" % (task[:1500], ", ".join(list_files(40)) or "(none)")
     got = []
-    for nm, m in pick_slots(EXAM_PREF, 6):
-        if STATE["cancel"] or len(got) >= 2:
-            break
-        t = call_slot(nm, m, EXAM_SYS, user)
+    first = pick_slots(EXAM_PREF, 2)
+    for (nm, m), t in zip(first, par_calls(first, EXAM_SYS, user)):          # dono ek saath
         d = parse_json_reply(t) if t else None
         if isinstance(d, dict) and str(d.get("type", "")).strip().lower() in TYPE_RANK:
             got.append((nm, d))
+    if not got:                                                             # dono fail: baaki ek-ek karke
+        for nm, m in pick_slots(EXAM_PREF, 6):
+            if STATE["cancel"] or len(got) >= 2:
+                break
+            if (nm, m) in first:
+                continue
+            t = call_slot(nm, m, EXAM_SYS, user)
+            d = parse_json_reply(t) if t else None
+            if isinstance(d, dict) and str(d.get("type", "")).strip().lower() in TYPE_RANK:
+                got.append((nm, d))
     if not got:
         return None
     types = [str(d["type"]).strip().lower() for _, d in got]
@@ -6077,7 +6117,7 @@ def plan_pipeline(task, goal, level, typ):
     brief = make_brief(task, goal, level)
     STATE["brief"] = brief
     n_plan = 1 if level <= 3 else (2 if level <= 6 else 3)          # chhota kaam = ek planner
-    gap_rounds = 1 if level <= 6 else PLAN_GAP_ROUNDS
+    gap_rounds = 0 if level <= SMALL_LEVEL else (1 if level <= 6 else PLAN_GAP_ROUNDS)
     max_miss = 2 if level <= 3 else (4 if level <= 6 else 8)
     user = "%s\n\nTASK:\n%s\n\nGOAL: %s\nTYPE: %s\nLEVEL: %d/10 (about %d-%d lines, about %d files)\nEXISTING FILES: %s" % (
         brief, task[:3000], goal, typ, level, lo, hi, nf, ", ".join(list_files(40)) or "(none)")
@@ -6147,6 +6187,11 @@ def plan_pipeline(task, goal, level, typ):
                 "; ".join(ui) or "-", "; ".join(adv) or "-"))
 
 
+FAST_LANE_NOTE = ("\n[CHHOTA KAAM - FAST LANE: koi sawal ya plan nahi. Jo user ne bola usi se khud sahi andaza lagao aur andaza ek line me likh do. "
+                  "Sabse kam files banao (2-3) aur SAARI files isi ek jawab me: har file ke liye alag @@WRITE (har ek 120 line tak). "
+                  "Phir ek @@NOTE me run/deploy ke steps likho aur @@DONE. Naya feature mat jodo jo user ne nahi maanga.]")
+
+
 def do_understand(task):
     """Naya: 2 AI task dekhte hain, type+level tay, user se sawal, phir 3 AI plan."""
     if len(task.split()) < 4 and not build_intent(task):
@@ -6168,6 +6213,9 @@ def do_understand(task):
     samajh = "\n[SAMAJH: %s | type=%s | level=%d/10%s]" % (goal, typ, level, (" | " + " ; ".join(STATE["criteria"])) if STATE["criteria"] else "")
     if typ not in ("code", "android"):
         return samajh
+    if is_small() and not forced:
+        ev("note", text="⚡ chhota kaam: sawal aur plan chhod ke seedha banata hoon")
+        return samajh + FAST_LANE_NOTE
     extra = ""
     if not forced and not project_has_files():
         ans_l = []
@@ -6332,6 +6380,8 @@ def quick_scan(rel):
 
 
 def review_hook(rel, writer=None):
+    if is_small():
+        return ""
     if CODE_FLOW and SCAN_ON_CHECK and cur_mode() in ("code", "android") and rel.lower().endswith(REVIEW_EXT):
         TRACK.setdefault("dirty_files", set()).add(rel)
         try:
@@ -6420,7 +6470,52 @@ FINAL_SYS = FINAL_SYS + " If a MEMORY MAP is given, also report any cross-file m
 _done_gate_orig = done_gate
 
 
+SMALL_FINAL_MAX = int(_env("SMALL_FINAL_MAX", "2"))      # chhote kaam me @@DONE par poore project ki itni jaanch (fir jaane do)
+SMALL_FINAL_SYS = ("You review a SMALL finished project, all files together, like a developer doing a last read-through before shipping. "
+                   "Report ONLY real defects: syntax errors, crashes, wrong imports or names between files, config that makes it fail to start or deploy, "
+                   "or logic that clearly does not do what the TASK asks. Do NOT report suggestions, extra features, style, hardening, "
+                   "or things that are fine. Check each file against the others. Give the exact line from the numbered listing. "
+                   'Reply with ONLY a JSON array, no prose, no code fence: [{"file":"path","line":N,"bug":"what is wrong","fix":"exact change"}]. '
+                   "Reply [] if there is no real defect. Max 6 items.")
+
+
+def small_final_review():
+    """Chhote kaam ke liye: saari files ek saath, ek call, sirf asli bug. ([bug,...], provider) ya (None, '') agar reviewer nahi mila."""
+    parts, total = [], 0
+    for rel in list_files(None):
+        if not rel.lower().endswith(REVIEW_EXT):
+            continue
+        txt = _read(rel, 30000)
+        if not txt.strip() or total + len(txt) > PAYLOAD_MAX:
+            continue
+        total += len(txt)
+        parts.append("FILE: %s\n%s" % (rel, _numbered(txt)))
+    if not parts:
+        return None, ""
+    user = "TASK:\n%s\n\nDONE CONDITIONS:\n%s\n\n%s" % ((STATE.get("task") or "")[:2000], "\n".join(STATE.get("criteria") or []) or "(none)", "\n\n".join(parts))
+    for nm, md in pick_slots(("GEM", "JAAT", "DS", "NV2", "GROQ"), 2, len(user) + len(SMALL_FINAL_SYS)):
+        t = call_slot(nm, md, SMALL_FINAL_SYS, user)
+        d = parse_json_reply(t) if t else None
+        b = _norm_bugs(d, "")
+        if b is not None:
+            return drop_phantom(b), nm
+    return None, ""
+
+
 def done_gate():
+    if is_small():
+        n = TRACK.get("small_final_n", 0)
+        if n >= SMALL_FINAL_MAX:
+            return ""
+        TRACK["small_final_n"] = n + 1
+        ev("note", text="🔎 poora project ek saath padh ke aakhri jaanch (%d/%d)..." % (n + 1, SMALL_FINAL_MAX))
+        bugs, prov = small_final_review()
+        if not bugs:
+            show_review("Poora project", True, "koi asli bug nahi mila" if bugs is not None else "reviewer nahi mila", prov)
+            return ""
+        show_review("Poora project", False, "%d bug\n%s" % (len(bugs), bug_text({"project": bugs})), prov)
+        return ("DONE mana (aakhri jaanch %d/%d): saari files ek saath padhne par ye asli bug mile. Har bug @@EDIT se theek karo "
+                "(galat lage to ek line me wajah likho), phir @@DONE:\n%s" % (n + 1, SMALL_FINAL_MAX, bug_text({"project": bugs})))
     if CODE_FLOW and SCAN_ON_CHECK:
         TRACK["scan_final"] = True
         try:
