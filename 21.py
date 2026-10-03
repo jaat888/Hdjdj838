@@ -8949,13 +8949,64 @@ def app_name_for(task):
     return " ".join(w.capitalize() for w in ws[:3]) or "My App"
 
 
-def build_questions(task):
-    """Shuru ke sawal: platform (agar user ne nahi bataya), language (sirf terminal/bot me), aur ek khaas cheez. Max 3."""
+ASK_MAX = max(1, min(10, int(_env("ASK_MAX", "10") or 10)))         # Gemini max kitne sawal poochh sakta hai (1-10)
+QGEN_SYS = (
+    "You are the first helper (Gemini) of a NON-TECHNICAL user who wants software built by an AI team (DSX = architect who plans, JAAT = coder). "
+    "READ THE USER MESSAGE CAREFULLY (it may be Hinglish with spelling mistakes). Before building starts, ask ONLY the questions whose answer is truly missing and would change what gets built. "
+    "Never ask what the message already says or implies. Ask 0 questions if the message is already clear enough, otherwise 1 to " + str(ASK_MAX) + " (more only for big, vague ideas). "
+    "Good topics: where it runs (phone app / web page / terminal-bot), main features, who uses it, language of the content, look/colours, save/share/login needs, limits (free only, offline). "
+    "Each question: short, very simple Hinglish, no jargon, 2-4 short options, last option always 'Tum chuno'. "
+    "Reply ONLY JSON, no prose: " + '{"questions":[{"q":"...","options":["...","...","Tum chuno"],"key":"platform|language|size|other"}]}' + " "
+    "Use key 'platform' ONLY for the where-does-it-run question, 'language' for programming language.")
+SPEC_SYS = (
+    "You are Gemini, first helper of a NON-TECHNICAL user. Read the USER MESSAGE and the Q&A and write the requirement for DSX (the architect who will plan the files). "
+    "Reply ONLY JSON: " + '{"platform":"android|web|cli|bot|other|unknown","spec":"one clear English paragraph: what to build, platform, EVERY feature named or implied, answers given, and for each \'Tum chuno\' answer say DSX decides the simplest free option"}' + ". "
+    "Do not invent features the user did not ask for. No code.")
+
+
+def default_questions_start(task):
+    """Gemini na chale to purane 2 sawal."""
     qs = []
     if not (RUN_SAID_RE.search(task or "") or PHONE_RE.search(task or "")):
         qs.append({"q": "Ye kahan chalega? (phone ka app chahiye to Android chuno)", "options": ["Android app (phone, APK)", "Web page (browser)", "Terminal / Bot / Script", "Tum chuno"], "key": "platform"})
     qs.append({"q": "Kitna bada banau? Koi khaas cheez jo zaroor chahiye ho to neeche likh do.", "options": ["Simple (basic)", "Zyada features", "Tum chuno"], "key": "size"})
     return qs[:3]
+
+
+def build_questions(task):
+    """Gemini (fast) message dhyaan se padh ke 0-10 sawal banata hai (sirf jo sach me adhura ho). Gemini na chale to purane 2 sawal."""
+    try:
+        ev("note", text="🧠 Gemini aapka message padh raha hai, zaroori sawal soch raha hai...", _log=False)
+        txt, nm = small_gen(QGEN_SYS, "USER MESSAGE:\n" + clip(task, 2500), 1400, TRIAGE_PREF, fast=True)
+        d = parse_json_reply(txt) if txt else None
+        items = d.get("questions") if isinstance(d, dict) else (d if isinstance(d, list) else None)
+        if items is None:
+            return default_questions_start(task)
+        qs = []
+        for it in items:
+            if not isinstance(it, dict) or not str(it.get("q") or "").strip():
+                continue
+            opts = [clip(str(o).strip(), 60) for o in (it.get("options") or []) if str(o).strip()][:4]
+            if opts and not any(re.search(r"tum\s*chuno", o, re.I) for o in opts):
+                opts = opts[:3] + ["Tum chuno"]
+            qs.append({"q": clip(str(it["q"]).strip(), 220), "options": opts, "key": str(it.get("key") or "other").strip().lower()})
+        return qs[:ASK_MAX]
+    except Exception as e:
+        log("build_questions galti: %s" % e)
+        return default_questions_start(task)
+
+
+def gem_spec(task, answers):
+    """Gemini: message + jawab se DSX ke liye saaf requirement. '' = nahi bana."""
+    try:
+        user = "USER MESSAGE:\n%s\n\nQ&A:\n%s" % (clip(task, 2500), "\n".join(answers) or "-")
+        txt, nm = small_gen(SPEC_SYS, user, 1200, TRIAGE_PREF, fast=True)
+        d = parse_json_reply(txt) if txt else None
+        if isinstance(d, dict):
+            return str(d.get("platform") or "").lower(), clip(str(d.get("spec") or "").strip(), 1500)
+    except Exception as e:
+        log("gem_spec galti: %s" % e)
+    return "", ""
 
 
 def wants_questions(task):
@@ -8965,21 +9016,27 @@ def wants_questions(task):
 
 
 def ask_first(task):
-    """(task + jawab, platform, stop?). platform = 'android' | ''."""
+    """(task + jawab + Gemini spec, platform, stop?). platform = 'android' | ''."""
     answers, plat = [], ("android" if (ANDROID_TASK_RE.search(task) or PHONE_RE.search(task)) else "")
     for q in build_questions(task):
         ans, how = ask_user(q["q"], q["options"], ctx="Task: " + task[:500])
         if how == "stop":
             return task, plat, True
         answers.append("%s -> %s" % (q["q"], ans))
-        if q["key"] == "platform":
+        if q.get("key") == "platform":
             plat = "android" if ANDROID_ANS_RE.search(ans or "") else ""
             if not plat and re.search(r"terminal|bot|script", ans or "", re.I) and not LANG_SAID_RE.search(task):
                 a2, h2 = ask_user("Kaunsi language me banau?", ["Python", "JavaScript", "Tum chuno"], ctx="Task: " + task[:500])
                 if h2 == "stop":
                     return task, plat, True
                 answers.append("Kaunsi language me banau? -> %s" % a2)
-    return task + ("\n[User ke jawab: %s]" % " | ".join(answers) if answers else ""), plat, False
+    gp, spec = gem_spec(task, answers)                      # Gemini ki saaf requirement DSX tak
+    if not plat and gp == "android":
+        plat = "android"
+    out = task + ("\n[User ke jawab: %s]" % " | ".join(answers) if answers else "\n[User ke jawab: (koi sawal nahi poochha, message saaf tha)]")
+    if spec:
+        out += "\n[GEMINI SPEC - DSX ke liye user ki requirement (plan khud tay karo): %s]" % spec
+    return out, plat, False
 
 
 def android_prepare(task_plain):
@@ -9194,8 +9251,69 @@ def pipe_front(task):
     return False
 
 
+# ---------- CHHOTA FIX MODE: chhota bug = chhota kaam (plan nahi, gradle/android jaanch nahi, kam kadam) ----------
+MINI_STEPS = int(_env("MINI_STEPS", "12") or 12)                    # chhote fix me max kadam
+MINI_RULES = ("\n[CHHOTA FIX MODE: sirf bataya hua bug theek karo, aur kuch nahi. (1) Sirf wahi file @@READ karo jisme bug hai. "
+              "(2) @@EDIT se sirf galat hissa badlo; poori file @@WRITE mat karo (file toot-ti dikhe to pehle chhoti line range @@READ karke dobara dekho). "
+              "(3) Nayi file, gradle, manifest, icon, docs, MEMORY.md, workflow mat banao/badlo. (4) Ek @@VERIFY, phir @@DONE. "
+              "(5) Tool ka natija khud mat likho, Mumbai ke natija ka intezaar karo.]")
+
+_do_understand_full = do_understand
+
+
+def do_understand(task):
+    if STATE.get("mini_fix"):                                          # na 6 criteria, na DSX plan
+        STATE.update(utype="code", goal=clip(task, 200), level=1, criteria=["D1: bataya hua bug theek hua, naya kuch nahi badla"],
+                     plan_items=[], plan_ck=[])
+        ev("note", text="🔧 chhota fix: seedha file padh ke theek karunga (plan aur poori Android jaanch nahi)", _log=False)
+        return MINI_RULES
+    return _do_understand_full(task)
+
+
+_verify_project_full = verify_project
+
+
+def verify_project(force_android=False):
+    if STATE.get("mini_fix"):                                          # sirf syntax / copy-paste jaanch: gradle-icon-manifest nahi
+        files, items = list_files(None), []
+        check_generic(files, items)
+        return [(lv, m) for lv, m in items]
+    return _verify_project_full(force_android)
+
+
+_check_generic_base = check_generic
+
+
+def check_generic(files, items):
+    _check_generic_base(files, items)
+    for f in files:                                                    # copy-paste galtiyan: AI ki file me aksar dohrav aa jata hai
+        if not f.lower().endswith((".dart", ".kt", ".java", ".js", ".ts", ".py")):
+            continue
+        txt = _read(f, 400000)
+        if not txt:
+            continue
+        lines, run = txt.split("\n"), 1
+        for i in range(1, len(lines) + 1):
+            cur = lines[i].strip() if i < len(lines) else None
+            prev = lines[i - 1].strip()
+            if cur is not None and cur == prev and len(cur) >= 12:
+                run += 1
+                continue
+            if run >= 3:
+                items.append(("E", "%s line %d: ek hi line %d baar lagatar likhi hai: '%s' (copy-paste galti, ek rakho)" % (f, i - run + 1, run, clip(prev, 60))))
+            run = 1
+        if f.lower().endswith(".dart"):
+            cnt = {}
+            for m in re.finditer(r"^\s*factory\s+([A-Za-z_]\w*(?:\.\w+)?)\s*\(", txt, re.M):
+                cnt[m.group(1)] = cnt.get(m.group(1), 0) + 1
+            for k, v in cnt.items():
+                if v > 1:
+                    items.append(("E", "%s me 'factory %s' %d baar hai; sirf ek chahiye" % (f, k, v)))
+
+
 def run_agent(task):
-    """PIPE chalu ho to pehle pipe_front; False aaye to purana agent loop (task_override me shuru ke sawalon ke jawab saath)."""
+    """PIPE chalu ho to pehle pipe_front; False aaye to purana agent loop. 'CHHOTA FIX' ho to mini mode (kam kadam, kam jaanch)."""
+    global MAX_STEPS
     if PIPE:
         track_reset()
         UNDO_STACK.append({})
@@ -9204,7 +9322,18 @@ def run_agent(task):
             return
         if UNDO_STACK:
             UNDO_STACK.pop()                       # purana run_agent apni entry khud banata hai
-    return _run_agent_53(STATE.pop("task_override", None) or task)
+    ov = STATE.pop("task_override", None)
+    mini = bool(ov and ov.startswith("CHHOTA FIX"))
+    old_steps = MAX_STEPS
+    STATE["mini_fix"] = mini
+    if mini:
+        MAX_STEPS = MINI_STEPS
+    try:
+        return _run_agent_53(ov or task)
+    finally:
+        MAX_STEPS = old_steps
+        STATE["mini_fix"] = False
+
 
 if __name__ == "__main__":
     if "--setup" in sys.argv:
