@@ -2208,7 +2208,7 @@ DEP_MAP = (("androidx.recyclerview", "recyclerview"), ("com.google.android.mater
            ("androidx.swiperefreshlayout", "swiperefreshlayout"), ("androidx.documentfile", "documentfile"))
 LINTED_EXT = (".py", ".json", ".xml", ".kt", ".java", ".kts", ".gradle", ".yml", ".yaml")
 VERIFY_ITEM_RE = re.compile(r"\b(?:test|build|verify|compile)\b|jaanch", re.I)
-VERIFY_CMD_RE = re.compile(r"py_compile|node\s+--check|pytest|unittest|gradle|assemble|\btsc\b|npm\s+(?:test|run\s+build)|flake8|ruff|mypy|"
+VERIFY_CMD_RE = re.compile(r"py_compile|node\s+--check|node\s+\S*test\S*\.[cm]?js|pytest|unittest|gradle|assemble|\btsc\b|npm\s+(?:test|run\s+build)|flake8|ruff|mypy|"
                            r"cargo\s+(?:check|build|test)|go\s+(?:build|test|vet)|\bmake\b|javac|kotlinc|xmllint|json\.tool", re.I)
 LAZY_RE = re.compile(r"rest of (?:the )?(?:code|file)|baaki (?:code|file)|\.\.\.\s*\(?(?:existing|baaki|same)\b|TODO: implement", re.I)
 
@@ -2421,6 +2421,33 @@ def check_android_code(files, items):
                 items.append((E, "%s me R.%s.%s hai par wo resource bana nahi: %s" % (f, typ, nm, _missing_hint(typ, nm))))
 
 
+def js_syntax_error(txt, ext=".js"):
+    """Node ho to asli `node --check`; import/export ho to module ki tarah (Cloudflare Worker .js me bhi yahi hota hai). '' = theek ya node nahi."""
+    node = shutil.which("node")
+    if not node:
+        return ""
+    is_mod = ext == ".mjs" or bool(re.search(r"^\s*(?:import\b|export\b)", txt, re.M))
+    import tempfile
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".mjs" if is_mod else ".cjs", delete=False, encoding="utf-8") as fh:
+            fh.write(txt)
+            tmp = fh.name
+        r = subprocess.run([node, "--check", tmp], capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            return ""
+        lines = [l for l in (r.stderr or "").splitlines() if l.strip() and tmp not in l]
+        return clip(" | ".join(lines[:3]) or "syntax galat", 220)
+    except Exception:
+        return ""
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
 def check_generic(files, items):
     E, W = "E", "W"
     for f in files:
@@ -2441,6 +2468,10 @@ def check_generic(files, items):
                 compile(txt, f, "exec")
             except SyntaxError as e:
                 items.append((E, "%s:%s Python syntax galti: %s" % (f, e.lineno, e.msg)))
+        elif ext in (".js", ".mjs", ".cjs"):
+            err = js_syntax_error(txt, ext)
+            if err:
+                items.append((E, "%s JS syntax galti (node): %s" % (f, err)))
         elif ext == ".json":
             try:
                 json.loads(txt)
@@ -6189,7 +6220,10 @@ def plan_pipeline(task, goal, level, typ):
 
 FAST_LANE_NOTE = ("\n[CHHOTA KAAM - FAST LANE: koi sawal ya plan nahi. Jo user ne bola usi se khud sahi andaza lagao aur andaza ek line me likh do. "
                   "Sabse kam files banao (2-3) aur SAARI files isi ek jawab me: har file ke liye alag @@WRITE (har ek 120 line tak). "
-                  "Phir ek @@NOTE me run/deploy ke steps likho aur @@DONE. Naya feature mat jodo jo user ne nahi maanga.]")
+                  "Phir ASLI check chalao, andaze se 'theek hai' mat bolo: JS/Worker ho to package.json me \"type\":\"module\" rakho aur "
+                  "@@RUN node --check <file> har JS file par; Cloudflare Worker ho to ek chhoti test.mjs likho jo naqli env aur naqli fetch se "
+                  "fetch/scheduled handler chalaye aur @@RUN node test.mjs; Python ho to @@RUN python -m py_compile <file>. Error aaye to @@EDIT se theek karo "
+                  "aur dobara chalao. Pass hone par ek @@NOTE me run/deploy ke steps likho aur @@DONE. Naya feature mat jodo jo user ne nahi maanga.]")
 
 
 def do_understand(task):
