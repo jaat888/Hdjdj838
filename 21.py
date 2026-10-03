@@ -49,6 +49,7 @@ APIS = {
         "min_gap": 1,
         "rate_cool": 15,           # 429 ke baad sirf 15 sec aaram (lock nahi). 530 (Cloudflare) par sirf 3 sec ruk ke dobara: ask_oai dekho
         "retry_429": 2,            # 429 par 2 baar ruk ke dobara
+        "max_ctx": 120000,         # JAAT ek jawab me ~37k char deta hai: input bhi bada lo (413 aaye to LEARN_CTX khud chhota kar leta hai)
     },
     "DSX": {                       # DeepSeek (ab sabse last). Key: environment me DSX_KEY, ya ⚙ se
         "type": "oai",
@@ -132,14 +133,14 @@ APIS = {
     "DAI": {
         "type": "deepai",
         "base": "https://api.deepai.org/hacking_is_a_serious_crime",
-        "key": _env("DAI_KEY"),
+        "key": _env("DAI_KEY", "tryit-8803332334-5329fed31418c18274ac106f280207f3"),
         "models": ["standard"],
         "max_chars": 3000,
     },
 }
 
 # ---- bada jawab (token) + image dekhna: JAAT aur Gemini (conf se badal sakte ho) ----
-for _n, _tok in (("JAAT", 32000), ("GEM", 60000), ("GEM2", 60000), ("GEM3", 60000)):
+for _n, _tok in (("JAAT", 10400), ("GEM", 60000), ("GEM2", 8192), ("GEM3", 60000)):   # JAAT ~10,600 token par kat jata hai; GEM2 32000 par 502 deta hai (test se pata chala)
     if _n in APIS:
         APIS[_n].setdefault("max_tokens", _tok)
         APIS[_n]["total_timeout"] = max(APIS[_n].get("total_timeout", 0), 600)   # lamba jawab beech me na kate
@@ -264,7 +265,7 @@ nayi lines
 KAISE SOCHO (niyam kam, samajh zyada):
 1. Pehle samjho. AUTO JAANKARI me SAMAJH hoti hai: user ka asli maqsad, kaam ka type aur DONE CRITERIA (kaam kab poora maana jayega). Wahi nishana hai: usse bahar ka kaam mat badhao, usme se kuch chhodo mat.
 2. Banao, phir chala ya padh ke dekho. Bina saboot 'ho gaya' mat bolo. @@DONE hamesha AKELA likho (WRITE/RUN ke saath nahi); saar me har D-criteria ka saboot likho (kaunse @@RUN/@@READ ke natije se). Mumbai ek alag reviewer se ye saboot asli natije se milata hai.
-3. Chhote kadam: ek @@WRITE/@@EDIT me 120 line tak (.pdf/.docx/.md/.txt me 120). Purani file badalni ho to pehle @@READ, phir chhota @@EDIT (SEARCH text file jaisa bilkul waisa); poori file dobara @@WRITE mat karo. @@RUN/@@BG ke baad ruk jao aur natija dekho.
+3. Bade kadam: ek @@WRITE/@@EDIT me 600 line tak (.pdf/.docx/.md/.txt me bhi 600); poori file ek hi @@WRITE me likho, 600 se badi ho to 600-600 line ke hisson me. Purani file badalni ho to pehle @@READ, phir chhota @@EDIT (SEARCH text file jaisa bilkul waisa); poori file dobara @@WRITE mat karo. @@RUN/@@BG ke baad ruk jao aur natija dekho.
 4. Type ke hisaab se: android/code ke naye kaam me pehle @@SPEC (BEHAVIOUR: user kya dekhe/kare, kahan toot sakta hai: khaali data, galat input, error par message) aur @@PLAN (ek file ya feature = ek kadam, har kadam ke baad @@CHECK n). Kitni lines chahiye wo AUTO JAANKARI me likha hai. light type (document, PDF, notes, likhna, sawal, chhota badlav) me seedha kaam karo: SPEC/PLAN mat likho, Android baatein mat jodo.
 5. Reviewer ya jaanch ne mana kiya to wajah padho aur isi baar sahi karo. Wahi tareeka dohrao mat; 2 baar ke baad bhi na bane to asli jad dhundho aur naya raasta lo. User ki pasand ke bina sach me aage nahi badh sakte to @@ASK; chhote faisle khud lo.
 6. Galti pakdi jaye (reviewer, error ya user se) to theek karne ke baad @@LEARN likho. AUTO JAANKARI ke SEEKHA me jo likha hai wo dobara mat karo.
@@ -279,7 +280,7 @@ Udaharan:
 SYSTEM_MINI = """Tum Mumbai ho, coding assistant. Hinglish me chhota bolo. Sirf baat/sawal ho to seedha jawab do. Kaam ho to commands (har command nayi line par @@ se):
 @@WRITE <file>  (content, aakhir me @@END alag line par)
 @@EDIT <file>  (<<<<<<< SEARCH / ======= / >>>>>>> REPLACE, aakhir me @@END)
-@@READ <file> <a-b>  (badi file ho to chhoti line range, jaise @@READ f.kt 1-60)   @@LS <dir>   @@TREE   @@GREP <text>   @@RUN <cmd>   @@VERIFY (project jaanch)   @@NOTE <ek line>   @@LEARN <sabak>   @@ASK <sawal>   @@LOOK <file.pdf ya image> [sawal]   @@CHECK <n>   @@DONE <saar>
+@@READ <file> <a-b>  (badi file ho to line range, jaise @@READ f.kt 1-400; ek baar me ~1000 line tak milti hain)   @@LS <dir>   @@TREE   @@GREP <text>   @@RUN <cmd>   @@VERIFY (project jaanch)   @@NOTE <ek line>   @@LEARN <sabak>   @@ASK <sawal>   @@LOOK <file.pdf ya image> [sawal]   @@CHECK <n>   @@DONE <saar>
 Neeche PLAN dikhe to ek-ek kadam karo, har kadam ke baad @@CHECK n. Saare kadam ✅ hone par hi @@DONE.
 @@DONE akela likho, @@VERIFY/RUN ka natija dekh ke. Test/build kadam @@VERIFY saaf aane par hi @@CHECK. Chhoti chhoti files likho. Ek reply me sirf EK command do aur uska natija dekh ke hi agla do. Jo file ka hissa padh chuke ho use dobara mat padho; natija kata ho to agli line range padho."""
 
@@ -883,7 +884,7 @@ def ctx_limit(name, cfg):
     return 48000
 
 
-SMALL_NUDGE = ("\n\n[Mumbai: pichhla jawab lamba hone se khali gaya. Ab SIRF EK chhota kadam karo: ek file ya ek feature, 40-50 line se kam, "
+SMALL_NUDGE = ("\n\n[Mumbai: pichhla jawab lamba hone se khali gaya. Ab SIRF EK chhota kadam karo: ek file ya ek feature, 150-200 line se kam, "
                "kam se kam soch-vichar. Reviewer ho to sirf chhota JSON, lambi vyakhya nahi.]")
 
 
@@ -1080,6 +1081,7 @@ def ask(msgs, role="write"):
 CONVERT_EXT = (".zip", ".docx", ".pptx", ".xlsx", ".pdf", ".tar", ".tgz", ".gz", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".odt")
 MAKE_EXT = (".pdf", ".docx", ".xlsx")
 FMT_MAX = 12000
+READ_CAP = int(os.environ.get("READ_CAP") or 40000)   # @@READ ek baar me itne char (~1000 line) dikhata hai (pehle 12000 = ~300 line, beech se kat jata tha)
 
 
 def _xml_text(node):
@@ -2689,13 +2691,13 @@ def is_strict_file(a):
     return os.path.splitext(ap)[1].lower() in INDENT_EXT or os.path.basename(ap) in ("Makefile", "makefile")
 
 
-def excerpt_for(rel, body="", width=40):
+def excerpt_for(rel, body="", width=150):
     """File ka wo hissa jo model ko dikhana hai: chhoti file poori, badi file me SEARCH ki pehli line ke aas-paas."""
     txt = _read(rel, 400000)
     if not txt:
         return ""
     lines = txt.split("\n")
-    if len(txt) <= 6000:
+    if len(txt) <= 30000:
         return "(poori file, %d lines)\n%s" % (len(lines), txt)
     first = ""
     m = re.search(r"<{5,9} SEARCH\n(.*?)\n={5,9}\n", body or "", re.S)
@@ -2708,7 +2710,7 @@ def excerpt_for(rel, body="", width=40):
             close = difflib.get_close_matches(first, [l.strip() for l in lines], n=1, cutoff=0.5)
             hit = [i for i, l in enumerate(lines) if close and l.strip() == close[0]]
         idx = hit[0] if hit else 0
-    a, b = max(0, idx - 12), min(len(lines), idx + width)
+    a, b = max(0, idx - 40), min(len(lines), idx + width)
     return "(lines %d-%d, kul %d; baaki ke liye @@READ %s <a-b>)\n%s" % (a + 1, b, len(lines), rel, "\n".join(lines[a:b]))
 
 
@@ -3569,18 +3571,18 @@ def _final_gate_core():
             TRACK["polish"] = pl
             show_review("Polish top-10", False, "\n".join(pl), "")
             return ("POLISH (DONE abhi ruka): reviewer ke hisaab se is type ke achhe asli app me ye cheezein hoti hain jo yahan nahi hain:\n%s\n"
-                    "Har ek ko banao (chhote @@WRITE/@@EDIT me, 50 line se kam) YA ek line me wajah likh ke mana karo (jaise 'N3: nahi banaya kyunki ...'). "
+                    "Har ek ko banao (@@WRITE/@@EDIT me, 300 line tak) YA ek line me wajah likh ke mana karo (jaise 'N3: nahi banaya kyunki ...'). "
                     "Phir @@VERIFY aur @@DONE." % "\n".join(pl))
     return ""
 
 
 # ================= 9.py: dohra reviewer, user-flow, polish, size-limit, gradle-gate =================
 REVIEW_PARALLEL, REVIEW_GAP, PAYLOAD_MAX = False, 3, 60000   # reviewer ek-ek karke, beech me 3s, payload 60k char tak
-MAX_BODY_LINES, BODY_REJECT_MAX = int(_env("MAX_BODY_LINES", "120")), 4          # ek @@WRITE/@@EDIT me itni lines tak
+MAX_BODY_LINES, BODY_REJECT_MAX = int(_env("MAX_BODY_LINES", "600")), 4          # ek @@WRITE/@@EDIT me itni lines tak
 SPEC_MIN, PLAN_MIN = 10, 12                      # sirf android ke liye; baaki type ke liye PROFILES dekho
 DOC_BIN_EXT = (".pdf", ".docx", ".xlsx")
 DOC_BODY_EXT = DOC_BIN_EXT + (".md", ".txt", ".csv")
-DOC_BODY_LINES = 120                             # document files me ek @@WRITE ki hadd
+DOC_BODY_LINES = 600                             # document files me ek @@WRITE ki hadd
 
 # ---------- 20.py: kaam ka type -> kitni jaanch ----------
 # android = poori sakht jaanch (purana tareeka); code = bot/website/script/tool (halki); light = document/notes/chhota kaam (bina SPEC/PLAN ke)
@@ -3869,7 +3871,7 @@ def gradle_gate(k, a):
 
 
 def size_gate(k, a, body):
-    """Ek hi baar me 166 line nahi: 80 se zyada par roko, alag files me todne ko kaho."""
+    """Ek @@WRITE/@@EDIT ki line hadd (MAX_BODY_LINES) se zyada par roko, alag files me todne ko kaho."""
     if k not in ("WRITE", "EDIT"):
         return None
     rel = rel_of(a)
@@ -3881,7 +3883,7 @@ def size_gate(k, a, body):
         return None
     TRACK["size_rej"][rel] = TRACK["size_rej"].get(rel, 0) + 1
     return ("ROKA: ek @@%s me %d line hain, hadd %d hai. Chhota karo: bada kaam alag files me todo (jaise model, logic, screen/page alag) "
-            "ya pehle chhoti @@WRITE, phir kai chhote @@EDIT (60-120 line). Document ho to alag-alag part files me likho. "
+            "ya pehle chhoti @@WRITE, phir kai chhote @@EDIT (300-600 line). Document ho to alag-alag part files me likho. "
             "Har file ke baad reviewer dekhega." % (k, n, lim))
 
 
@@ -3957,11 +3959,11 @@ def run_cmd(k, a, body="", complete=True):
             lines = text.split("\n")
             if rng:
                 s, e = max(1, rng[0]), max(rng[0], rng[1])
-                return "(lines %d-%d, kul %d)\n%s" % (s, min(e, len(lines)), len(lines), clip("\n".join(lines[s - 1:e]), 12000)), False, True, None
-            if len(text) > 12000:
-                cut = text[:12000]
+                return "(lines %d-%d, kul %d)\n%s" % (s, min(e, len(lines)), len(lines), clip("\n".join(lines[s - 1:e]), READ_CAP)), False, True, None
+            if len(text) > READ_CAP:
+                cut = text[:READ_CAP]
                 return ("%s\n...(kata gaya: %d lines me se %d dikhi. Aage ke liye @@READ %s %d-%d)" % (
-                    cut, len(lines), cut.count("\n") + 1, a, cut.count("\n") + 1, cut.count("\n") + 200)), False, True, None
+                    cut, len(lines), cut.count("\n") + 1, a, cut.count("\n") + 1, cut.count("\n") + 900)), False, True, None
             return text, False, True, None
         if k in ("WRITE", "WRITEB64"):
             p = safe(a)
@@ -6363,7 +6365,7 @@ def plan_pipeline(task, goal, level, typ):
 
 
 FAST_LANE_NOTE = ("\n[CHHOTA KAAM - FAST LANE: koi sawal ya plan nahi. Jo user ne bola usi se khud sahi andaza lagao aur andaza ek line me likh do. "
-                  "Sabse kam files banao (2-3) aur SAARI files isi ek jawab me: har file ke liye alag @@WRITE (har ek 120 line tak). "
+                  "Sabse kam files banao (2-3) aur SAARI files isi ek jawab me: har file ke liye alag @@WRITE (har ek 600 line tak). "
                   "Phir ASLI check chalao, andaze se 'theek hai' mat bolo: JS/Worker ho to package.json me \"type\":\"module\" rakho aur "
                   "@@RUN node --check <file> har JS file par; Cloudflare Worker ho to ek chhoti test.mjs likho jo naqli env aur naqli fetch se "
                   "fetch/scheduled handler chalaye aur @@RUN node test.mjs; Python ho to @@RUN python -m py_compile <file>. Error aaye to @@EDIT se theek karo "
@@ -6708,14 +6710,14 @@ def done_gate():
 
 # ================= 22.py: asli AI sahayak (kam gate, zyada kaam, pehle research) =================
 # LEAN=0 environment me do to purana poora gate/reviewer flow wapas. ASK_USER=1 do to sawal poochna wapas.
-VERSION = "5.2"
+VERSION = "5.3"
 LEAN = _env("LEAN", "1") != "0"
 NEW_RULES = """
 NAYE NIYAM (inhe sabse upar maano):
 A. Tum asli AI sahayak ho, command-bot nahi. User ka maqsad samjho aur sawal mat poochho: tech stack, hosting, chhote faisle khud lo. User kahe "mujhe nahi pata" to faisla tumhara.
 B. Naya app/bot/site banane ya library/tool/hosting chunne se pehle 1-2 baar @@SEARCH karo (abhi latest kya chal raha hai, kya free hai) aur sirf wahi chuno jo abhi sach me chal raha ho. Purani yaad par bharosa mat karo.
 C. Jab tak user alag na bole, FREE service par chalne layak banao: kam dependency, ek hi service par chale, keys/token environment variable me.
-D. Seedha kaam karo: bade @@WRITE (300-400 line tak) ek baar me. Wahi file baar-baar @@READ mat karo. SPEC/PLAN sirf bade kaam me, aur chhota. @@NOTE jawab dene ke liye nahi hai.
+D. Seedha kaam karo: bade @@WRITE (500-600 line tak) ek baar me. Wahi file baar-baar @@READ mat karo. SPEC/PLAN sirf bade kaam me, aur chhota. @@NOTE jawab dene ke liye nahi hai.
 E. @@DONE ke saar me user se seedhi baat, saaf Hinglish me: kya bana, kaise chalana hai (steps), aur kahan FREE me host karein (kaun si service, kaise deploy, kya dhyan rakhna).
 F. Sirf wahi banao jo user ne maanga. Ek cheez maangi to doosra project ya extra feature mat banao.
 """
@@ -6727,11 +6729,11 @@ if LEAN:
     LIGHT_PREF = ("JAAT", "GEM", "GEM2", "GEM3")
     for _p in PROFILES.values():
         _p.update(spec_min=0, plan_min=0, need_spec=False, spec_review=False, check_review=False, flow=False, polish=False)
-    MAX_BODY_LINES = int(_env("MAX_BODY_LINES", "400"))
-    DOC_BODY_LINES = 400
+    MAX_BODY_LINES = int(_env("MAX_BODY_LINES", "600"))
+    DOC_BODY_LINES = 600
     MAX_TOKENS = int(_env("MAX_TOKENS", "32000"))
     REPEAT_MAX, REPEAT_WAIT = 6, 60
-    SYSTEM = SYSTEM.replace("120 line tak (.pdf/.docx/.md/.txt me 120)", "400 line tak") + NEW_RULES
+    SYSTEM = SYSTEM.replace("120 line tak (.pdf/.docx/.md/.txt me 120)", "600 line tak") + NEW_RULES
 
 _ask_user_prev, _do_understand_prev, _done_gate_prev = ask_user, do_understand, done_gate
 _scan_prev, _hook_prev = scan_dirty_files, review_hook
