@@ -59,6 +59,7 @@ APIS = {
         "timeout": 900,            # bahut bada project padhne me pehla token aane tak 15 min tak
         "total_timeout": 2400,     # lamba jawab (bug list / bada plan) 40 min tak na kate
         "group": "deepseek",
+        "human": _env("DSX_HUMAN", "1") != "0",   # 1 = DSX ko jaane wale message insaan jaise likhe jaate hain (system/prompt bhasha hata ke); 0 = band
         "max_conc": 1,
         "min_gap": 1,
         "rate_cool": 45,
@@ -713,18 +714,75 @@ def fold_system(msgs):
     return [{"role": "user", "content": sys_t}] + rest
 
 
+UA_HUMAN = "Mozilla/5.0 (Linux; Android 13; SM-A546E) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+HUMAN_OPEN = ("Hi, ek kaam me help chahiye.", "Hello! ek chhoti si help chahiye bhai.", "Hi, mera ek kaam atka hua hai, dekh do please.")
+HUMAN_SUBS = (
+    (re.compile(r"\[Mumbai:\s*(.*?)\]", re.S), r"(\1)"),
+    (re.compile(r"\[User ke jawab:\s*(.*?)\]", re.S), r"Maine ye jawab diye the: \1"),
+    (re.compile(r"\[GEMINI SPEC[^:\]]*:\s*(.*?)\]", re.S), r"Meri poori requirement: \1"),
+    (re.compile(r"\[GEMINI KI RAY[^:\]]*:\s*(.*?)\]", re.S), r"Ek dost ki ray: \1"),
+    (re.compile(r"Reply\s+(?:with\s+)?ONLY\s+(?:a\s+|an\s+)?JSON(?:\s+(?:object|array))?[^:.\n]*[:.]", re.I), "Bas JSON bhejna, aur kuch nahi likhna, main seedha paste karunga:"),
+    (re.compile(r"\bYou are (?:the |an? )?([^.\n]{3,120})\."), r"Tum ek \1 ki tarah dekho."),
+    (re.compile(r"BRIEF \([^)]*\):"), "Mera brief:"),
+    (re.compile(r"^[=#\-*_~]{5,}\s*$", re.M), ""),
+    (re.compile(r"\bMumbai\b"), "mera tool"),
+    (re.compile(r"\bJAAT\b"), "coder"),
+    (re.compile(r"\bDSX\b"), "architect"),
+    (re.compile(r"\bsab AI\b"), "sab"),
+    (re.compile(r"\n{3,}"), "\n\n"),
+)
+
+
+def human_text(t):
+    for rx, rep in HUMAN_SUBS:
+        t = rx.sub(rep, t)
+    return t.strip()
+
+
+def humanize(msgs):
+    """DSX ke liye: system message hata ke pehle user message me insaani lehje me jodo; 'You are...', 'Reply ONLY JSON', [Mumbai: ...] jaisi AI-prompt bhasha insaani bol-chaal me.
+    Kaam ka matlab/JSON ka dhaancha/files jaisa ka waisa rehta hai. Chhota message ('ping') waise hi."""
+    if not msgs or sum(len(str(m.get("content") or "")) for m in msgs if not isinstance(m.get("content"), list)) < 40:
+        return msgs
+    out = []
+    sys_parts = []
+    for m in msgs:
+        c = m.get("content")
+        if isinstance(c, str):
+            c = human_text(c)
+        if m.get("role") == "system":
+            if isinstance(c, str) and c:
+                sys_parts.append(c)
+            continue
+        out.append(dict(m, content=c))
+    if sys_parts:
+        head = HUMAN_OPEN[len("".join(sys_parts)) % len(HUMAN_OPEN)] + "\n\n" + "\n\n".join(sys_parts)
+        for m in out:
+            if m.get("role") == "user":
+                c = m.get("content")
+                if isinstance(c, list):
+                    m["content"] = [{"type": "text", "text": head + "\n\n"}] + c
+                else:
+                    m["content"] = head + "\n\n" + str(c or "")
+                break
+        else:
+            out.insert(0, {"role": "user", "content": head})
+    return out
+
+
 def upstream(cfg, model, body, timeout=None):
     b = dict(body)
     if cfg.get("no_system") and b.get("messages"):
         b["messages"] = fold_system(b["messages"])
+    if cfg.get("human") and b.get("messages"):
+        b["messages"] = humanize(b["messages"])
     b["model"] = model
     req = urllib.request.Request(
         cfg["base"].rstrip("/") + "/chat/completions", json.dumps(b).encode(),
-        {"Content-Type": "application/json", "Authorization": "Bearer " + cfg["key"], "User-Agent": UA})
+        {"Content-Type": "application/json", "Authorization": "Bearer " + cfg["key"], "User-Agent": UA_HUMAN if cfg.get("human") else UA})
     return urllib.request.urlopen(req, timeout=timeout or cfg.get("timeout", 60))
 
 
-# ---------- AI se poochna ----------
 class Cancelled(Exception):
     pass
 
