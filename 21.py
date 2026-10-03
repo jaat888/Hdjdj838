@@ -9,6 +9,8 @@ Environment variables (blitz me daalo):
   PORT              blitz khud deta hai (na ho to 8011)
   DATA_DIR          (optional) projects ka folder, default ~/mumbai_work
   ALLOWED_HOSTS     (optional) sirf ye domain maane, comma se alag
+  MCP_GATEWAY_URL   (optional) mcp-gateway ka link (jaise https://mcp-gateway.xxx.blitz.cloud) => @@MCP tools chalu
+  MCP_API_KEY       (optional) gateway par API_KEY lagi ho to wahi key
 
 Login: 50 galat try par 1 din ke liye lock. /health bina password ke 'ok' deta hai (uptime bot ke liye).
 Termux par bhi chalta hai:  python 21.py  ->  http://127.0.0.1:8011"""
@@ -248,6 +250,7 @@ Kaam ho to in commands se karo. Har command nayi line par sirf @@NAAM se shuru h
 @@GREP <text>            saari files me text dhundho
 @@LS <folder>            ek folder ki list
 @@READ <file> [a-b]      file padho (badi file ho to line range, jaise: @@READ app.py 100-220). zip, tar/gz, docx, xlsx, pptx, pdf aur image (Gemini/JAAT se andar ka text aur dikhawat) bhi padh leta hai\n@@UNZIP <file> [folder]  zip / tar / tgz / gz kholo\n@@SEARCH <sawal>         internet search (top 8 natije: title, link, saar). Phir kaam ka link @@WEB se padho\n@@NOTIFY <message>     user ke phone par message (kaam bahut lamba ho ya user ki zaroorat ho tab)\n@@WEB <https link>       web page ka text padho (sirf padhna; local/private address band). Library ka naya version ya docs dekhne ko
+@@MCP [server] [tool] [{json args}]   mcp-gateway ke tools: bina argument ke sab tools ki list, '@@MCP server' us server ke tools, '@@MCP server tool {\"a\":1}' tool chalao (calculator, filesystem wagairah). Sirf tab jab MCP_GATEWAY_URL set ho
 @@WRITE <file>           NAYI file, poora content, aakhir me @@END alag line par. Naam .pdf / .docx / .xlsx ho to asli file banti hai: body me "# bada heading", "## chhota heading", "- bullet", baaki paragraph (xlsx me har line ek row, comma se alag, "=SUM(A1:A3)" jaisa formula bhi chalta hai)
 @@EDIT <file>            purani file me badlav, neeche wale format me, aakhir me @@END
 @@WRITEB64 <file>        binary file (chhoti image wagairah), body base64, aakhir me @@END
@@ -1750,7 +1753,63 @@ def do_notify(msg):
 
 
 # ---------- commands padhna ----------
-CMD_NAMES = "SPEC|TEMPLATE|DEPS|WRITEB64|WRITE|EDIT|PLAN|CHECK|VERIFY|TREE|GREP|LS|READ|RUN|BG|LOG|KILL|UNZIP|WEB|SEARCH|NOTIFY|ZIP|NOTE|LEARN|ASK|LOOK|DONE"
+def do_mcp(arg):
+    """@@MCP -> sab tools | @@MCP <server> -> us server ke tools | @@MCP <server> <tool> {json args} -> tool chalao (mcp-gateway REST API)."""
+    base = _env("MCP_GATEWAY_URL").rstrip("/")
+    if not base:
+        return "ERROR: MCP_GATEWAY_URL set nahi hai (blitz env me mcp-gateway ka link daalo)", False, False, None
+    parts = arg.strip().split(None, 2)
+    hdr = {"User-Agent": UA, "Accept": "application/json", "Content-Type": "application/json"}
+    key = _env("MCP_API_KEY")
+    if key:
+        hdr["X-API-Key"] = key
+    q = urllib.parse.quote
+    if not parts:
+        url, data = base + "/v1/tools/schema", None
+    elif len(parts) == 1:
+        url, data = base + "/v1/servers/%s/tools" % q(parts[0], safe=""), None
+    else:
+        args = {}
+        if len(parts) == 3 and parts[2].strip():
+            try:
+                args = json.loads(parts[2])
+            except Exception as e:
+                return "ERROR: args sahi JSON nahi hai: %s (jaise: @@MCP calculator add {\"a\":2,\"b\":40})" % e, False, False, None
+        url = base + "/v1/servers/%s/tools/%s" % (q(parts[0], safe=""), q(parts[1], safe=""))
+        data = json.dumps({"args": args}).encode()
+    req = urllib.request.Request(url, data=data, headers=hdr, method="POST" if data is not None else "GET")
+    def _fetch(dead):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status, r.read(2 * 1024 * 1024)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read(65536)
+    try:
+        code, raw = cancellable(_fetch)
+    except Cancelled:
+        return "⏹ roka gaya", False, False, None
+    except Exception as e:
+        return "ERROR: gateway se baat nahi hui: %s" % e, False, False, None
+    text = raw.decode("utf-8", "replace")
+    try:
+        j = json.loads(text)
+    except Exception:
+        j = None
+    if code >= 400:
+        return "ERROR: gateway HTTP %d: %s" % (code, clip(text, 800)), False, False, None
+    if isinstance(j, dict) and "tools" in j and not parts:        # schema: chhota summary
+        rows = ["%s.%s - %s" % (t.get("server", "?"), t.get("mcp_tool", "?"), ((t.get("function") or {}).get("description") or "")[:90])
+                for t in j["tools"]]
+        return "MCP tools (%d):\n%s\n\n(chalane ko: @@MCP <server> <tool> {json args})" % (len(rows), "\n".join(rows)), False, True, None
+    if isinstance(j, dict) and "content" in j:                    # tools/call jawab
+        out = "\n".join(c.get("text", "") for c in j["content"] if isinstance(c, dict) and c.get("type") == "text") or text
+        if j.get("isError"):
+            return "ERROR (tool): " + clip(out, FMT_MAX), False, False, None
+        return clip(out, FMT_MAX), False, True, None
+    return clip(text, FMT_MAX), False, True, None
+
+
+CMD_NAMES = "SPEC|TEMPLATE|DEPS|WRITEB64|WRITE|EDIT|PLAN|CHECK|VERIFY|TREE|GREP|LS|READ|RUN|BG|LOG|KILL|UNZIP|WEB|SEARCH|NOTIFY|MCP|ZIP|NOTE|LEARN|ASK|LOOK|DONE"
 CMD_RE = re.compile(r"^[\s*`>_#\-]*@@(%s)\b[\s*`]*(.*)$" % CMD_NAMES)
 # "...baat.@@PLAN": command line ke beech me chipka ho to alag line bana do (kisi bhi space/backtick/quote ke baad wala nahi)
 GLUE_RE = re.compile(r"(?<=[^\s`*_\"'(\[>#\-])@@(?:%s)\b" % CMD_NAMES)
@@ -4075,6 +4134,8 @@ def run_cmd(k, a, body="", complete=True):
             return do_web(a)
         if k == "SEARCH":
             return do_search(a)
+        if k == "MCP":
+            return do_mcp(a)
         if k == "NOTIFY":
             return do_notify(a)
         if k == "NOTE":
@@ -5558,7 +5619,7 @@ footer textarea{min-height:54px;max-height:200px;padding:15px 18px;line-height:1
 <script>
 var lastKind='',last=0,running=false,sending=false,polling=false,redo=false,boot='',chat=document.getElementById('chat'),sheet=document.getElementById('sheet'),psheet=document.getElementById('psheet');
 function el(tag,cls,txt){var e=document.createElement(tag);if(cls)e.className=cls;if(txt!=null)e.textContent=txt;return e}
-var ICON={LS:'📂',READ:'📖',WRITE:'📝',WRITEB64:'🖼',EDIT:'✏️',TREE:'🌳',GREP:'🔎',RUN:'⚙️',BG:'🚀',LOG:'📜',KILL:'🛑',ZIP:'📦',UNZIP:'📂',WEB:'🌐',SEARCH:'🔍',NOTIFY:'🔔',NOTE:'🗒',VERIFY:'🛡',LOOK:'👁',LEARN:'🧠',ASK:'❓'},plan=[];
+var ICON={LS:'📂',READ:'📖',WRITE:'📝',WRITEB64:'🖼',EDIT:'✏️',TREE:'🌳',GREP:'🔎',RUN:'⚙️',BG:'🚀',LOG:'📜',KILL:'🛑',ZIP:'📦',UNZIP:'📂',WEB:'🌐',SEARCH:'🔍',NOTIFY:'🔔',MCP:'🧰',NOTE:'🗒',VERIFY:'🛡',LOOK:'👁',LEARN:'🧠',ASK:'❓'},plan=[];
 function toast(t){chat.appendChild(el('div','msg err',t));chat.scrollTop=chat.scrollHeight}
 var chk=null,chkN=[0,0],planBox=null;
 function esc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
