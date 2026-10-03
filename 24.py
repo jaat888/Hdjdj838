@@ -56,14 +56,14 @@ APIS = {
         "base": "https://my-ds-api.jaat.blitz.cloud/v1",
         "key": _env("DSX_KEY"),
         "models": ["deepseek-default"],
-        "timeout": 600,            # bade project ka poora padhna (pehla token aane tak) 10 min tak
-        "total_timeout": 1500,     # lamba jawab (bug list / bada plan) 25 min tak na kate
+        "timeout": 900,            # bahut bada project padhne me pehla token aane tak 15 min tak
+        "total_timeout": 2400,     # lamba jawab (bug list / bada plan) 40 min tak na kate
         "group": "deepseek",
         "max_conc": 1,
         "min_gap": 1,
         "rate_cool": 45,
-        "max_ctx": 300000,         # DeepSeek chat jitna (~128k token): poori project files ek baar me padh leta hai (413 aaye to khud chhota seekh leta hai)
-        "max_tokens": int(_env("DSX_MAX_TOKENS", "16000")),   # DeepSeek ke lambe jawab; 400 aaye to ask_oai khud aadha karke seekh leta hai (LEARN_MT)
+        "max_ctx": int(_env("DSX_CTX", "1500000")),   # DSX ka context 1M token (~3M char) hai: itna bada project ek baar me padh leta hai (~1.5M char = ~400-500k token, margin ke saath; 413 aaye to khud chhota seekh leta hai)
+        "max_tokens": int(_env("DSX_MAX_TOKENS", "64000")),   # DSX ka max output 384K hai; hum 64k tak maangte hain. Server 400 de to ask_oai error se asli hadd padh ke seekh leta hai (LEARN_MT)
     },
     "GEM": {                       # Gemini #1 (secondary)
         "type": "oai",
@@ -966,7 +966,8 @@ def ask_oai(name, cfg, msgs):
                     continue
                 ev("note", text="%s/%s HTTP %s %s" % (name, model, code, err_body[:150].replace("\n", " ")))
                 if code == 400 and use_mt and "max_tokens" in err_body.lower() and mt > 4096:
-                    mt = max(4096, mt // 2)              # provider ko itna bada jawab manzoor nahi: aadha karke seekh lo (dobara 400 mat khao)
+                    _lim = [int(x) for x in re.findall(r"\d{4,6}", err_body) if 1024 <= int(x) < mt]
+                    mt = max(_lim) if _lim else max(4096, mt // 2)   # error me hadd likhi ho (jaise <= 8192) to wahi, warna aadha: dobara 400 mat khao
                     LEARN_MT[name] = mt
                     ev("note", text="%s: jawab ki hadd %d token par laayi" % (name, mt), _log=False)
                     continue
@@ -6759,7 +6760,7 @@ def ask_user(question, options=None, ctx=""):
 DSX_PLAN = _env("DSX_PLAN", "1") != "0"                  # 0 = LEAN me DSX plan band
 DSX_FINAL = _env("DSX_FINAL", "1") != "0"                # 0 = @@DONE par DSX ki aakhri jaanch band
 DSX_FINAL_MAX = int(_env("DSX_FINAL_MAX", "2"))          # ek kaam me DSX itni baar poora project jaanch kar bug de sakta hai
-DSX_FINAL_CHARS = int(_env("DSX_FINAL_CHARS", "260000"))  # saari files milake itne char tak ek hi baar me (~80k token)
+DSX_FINAL_CHARS = int(_env("DSX_FINAL_CHARS", "1200000"))  # saari files milake itne char tak ek hi baar me (~300-400k token)
 
 
 def dsx_up():
@@ -6873,6 +6874,7 @@ PIPE_PAR = max(1, min(4, int(_env("PIPE_PAR", "3"))))               # JAAT ek sa
 PIPE_EXACT_MAX = int(_env("PIPE_EXACT_MAX", "2"))                   # wahi bug 2+ baar aaye to DSX ko "exact fix do" hard prompt (kul itni baar)
 PIPE_STEP_LINES = int(_env("PIPE_STEP_LINES", "500"))               # JAAT ek file me itni line se zyada nahi likh paata (~10k token)
 PIPE_FILES_MAX = 25
+PIPE_OUT = int(_env("PIPE_OUT_TOKENS", "64000"))                    # plan / bug-list / exact-fix me jawab ki upari hadd (provider ki apni hadd se zyada nahi jaata)
 PLAN_PREF = ("DSX", "GEM", "GEM2", "GEM3", "JAAT")                  # plan: DSX, band ho to Gemini, phir JAAT
 WRITE_PREF = ("JAAT", "GEM", "GEM2", "GEM3", "NV2")                 # likhai: JAAT, band ho to Gemini
 FIX_PREF = ("JAAT", "GEM", "GEM2", "GEM3", "NV2")                   # bug theek karna: JAAT
@@ -7529,7 +7531,7 @@ def make_blueprint(task):
             if nm == "DSX":
                 PIPE_ST["dsx_calls"] = PIPE_ST.get("dsx_calls", 0) + 1
             u = user if not t else user + "\n\n[Pichhla jawab sahi JSON nahi tha. Sirf ek JSON object do, files me kam se kam 1 file.]"
-            res = gen_call(nm, sysmsg, u, mt=15000)
+            res = gen_call(nm, sysmsg, u, mt=PIPE_OUT)
             if not res:
                 break
             bp = norm_bp(parse_json_reply(res[0]))
@@ -8028,7 +8030,7 @@ def final_files():
 def final_payload(nm, rnd):
     """DSX ke liye: task + contract + memory map + (pichhle round ke bug) + files. Jagah kam ho to badli nahi files sirf card ke roop me."""
     bp = PIPE_ST["bp"]
-    budget = min(DSX_FINAL_CHARS, ctx_limit(nm, APIS[nm]) - 16000) if nm != "DSX" else DSX_FINAL_CHARS
+    budget = min(DSX_FINAL_CHARS, ctx_limit(nm, APIS[nm]) - 16000)          # DSX ho ya Gemini: provider ka asli (seekha hua) context bhi dekho
     budget = max(30000, budget)
     seen = PIPE_ST.setdefault("reviewed", {})
     head = ["TASK:\n" + (PIPE_ST.get("task") or "")[:3000], "PLAN / CONTRACT:\nProject: %s | Stack: %s | Niyam: %s\n%s" % (
@@ -8047,11 +8049,12 @@ def final_payload(nm, rnd):
     parts, skipped = [], []
     files = final_files()
     sizes = {r: len(_read(r, 300000)) for r in files}
-    total = sum(sizes.values())
+    total = int(sum(sizes.values()) * 1.35)                    # line number lagne se text ~30% bada ho jata hai
     for rel in files:
         txt = _read(rel, 300000)
         if not txt.strip():
             continue
+        num = _numbered(txt)
         try:
             st = os.stat(os.path.join(WORK, rel))
             sig = [st.st_mtime, st.st_size]
@@ -8061,11 +8064,11 @@ def final_payload(nm, rnd):
         if total + used > budget and unchanged:
             skipped.append(rel)                                # badli nahi aur jagah kam: card hi kaafi
             continue
-        if used + len(txt) > budget:
+        if used + len(num) > budget:                              # line numbers samet asli size (context paar na ho)
             skipped.append(rel)
             continue
-        used += len(txt)
-        parts.append("FILE: %s\n%s" % (rel, _numbered(txt)))
+        used += len(num)
+        parts.append("FILE: %s\n%s" % (rel, num))
         seen[rel] = sig
     return ("\n\n".join(head) + "\n\n" + "\n\n".join(parts) + (
         "\n\n(jagah kam thi: ye files poori nahi dikhayi, inka card MEMORY MAP me hai: %s)" % ", ".join(skipped) if skipped else ""))
@@ -8105,7 +8108,7 @@ def final_review(rnd):
             if nm == "DSX":
                 PIPE_ST["dsx_calls"] = PIPE_ST.get("dsx_calls", 0) + 1
             u = user if not t else user + "\n\n[Pichhla jawab sahi JSON nahi tha. Sirf JSON array do, max 6 bug, har ek chhota.]"
-            res = gen_call(nm, FINAL_SYS_PIPE, u, mt=15000)
+            res = gen_call(nm, FINAL_SYS_PIPE, u, mt=PIPE_OUT)
             if not res:
                 break
             pj = parse_json_reply(res[0])
@@ -8159,7 +8162,7 @@ def dsx_exact_fix(rep):
             PIPE_ST["dsx_calls"] = PIPE_ST.get("dsx_calls", 0) + 1
         PIPE_ST["dsx_exact"] = PIPE_ST.get("dsx_exact", 0) + 1
         ev("note", text="🎯 %s ko hard prompt: ye bug baar-baar aa raha, exact purana/naya code do (%s)" % (nm, ", ".join(by)))
-        res = gen_call(nm, EXACT_SYS, "MEMORY MAP:\n%s\n\n%s" % (memory_text(3000) or "-", "\n\n".join(parts)), mt=8000)
+        res = gen_call(nm, EXACT_SYS, "MEMORY MAP:\n%s\n\n%s" % (memory_text(3000) or "-", "\n\n".join(parts)), mt=PIPE_OUT)
         if not res:
             continue
         out, cur = {}, None
