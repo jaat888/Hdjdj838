@@ -34,7 +34,7 @@ def _env(name, default=""):
 #   rate_cool  429/limit aane par itne second aaram (Gemini ka lock ~2 ghante => 7200)
 #   retry_429  429 aane par usi provider ko itni baar (ruk ke) dobara try karo, phir hi cooldown (default 1)
 PRIORITY = ["JAAT", "GEM", "GEM2", "GEM3", "DS", "GROQ", "NV2", "DAI", "DSX"]
-DISABLED = {"DSX"}          # DSX bekar: band (⚙ AI panel se chahe to chalu karo)
+DISABLED = set()            # DSX wapas aa gaya: chalu (⚙ AI panel se chahe to band karo)
 APIS = {
     "JAAT": {                      # JAAT (main, sabse zyada yahi chalega). Ek time par 1 request; 429 par 2 baar retry, cooldown bahut kam
         "type": "oai",
@@ -56,12 +56,14 @@ APIS = {
         "base": "https://my-ds-api.jaat.blitz.cloud/v1",
         "key": _env("DSX_KEY"),
         "models": ["deepseek-default"],
-        "timeout": 180,
-        "total_timeout": 400,
+        "timeout": 300,
+        "total_timeout": 600,
         "group": "deepseek",
         "max_conc": 1,
         "min_gap": 1,
         "rate_cool": 45,
+        "max_ctx": 300000,         # DeepSeek chat jitna (~128k token): poori project files ek baar me padh leta hai (413 aaye to khud chhota seekh leta hai)
+        "max_tokens": 8192,        # DeepSeek ke jawab ki hadd (bada maango to 400 aa sakta hai)
     },
     "GEM": {                       # Gemini #1 (secondary)
         "type": "oai",
@@ -6085,8 +6087,8 @@ def setup():
 CODE_FLOW = _env("CODE_FLOW", "1") != "0"        # 0 = purana flow
 SCAN_ON_CHECK = True                             # code/android me review har @@EDIT par nahi, file poori hone par (@@CHECK / @@DONE)
 EXAM_PREF = ("JAAT", "GEM", "GROQ", "GEM2", "GEM3", "DS")   # task dekhne wale (pehle 2 jo jawab dein)
-PLANNER_PREF = ("JAAT", "GROQ", "DS", "NV2", "DAI")   # plan banane wale 3
-MERGER_PREF = ("GEM", "GEM2", "GEM3", "JAAT")       # plan jodne wala: Gemini
+PLANNER_PREF = ("DSX", "JAAT", "GROQ", "DS", "NV2", "DAI")   # plan banane wale 3
+MERGER_PREF = ("DSX", "GEM", "GEM2", "GEM3", "JAAT")       # plan jodne wala: Gemini
 SCAN_PREF = ("JAAT", "GROQ")                        # poori file wale scanner (2): JAAT, Groq. DS alag (bade prompt par tukdon me). NV2/DAI sirf tab jab DS bhi na ho
 SCAN_BACKUP = ("NV2", "DAI")
 DS_PARTS_MAX = 6                                      # DS badi file ke itne tukde tak scan karta hai
@@ -6293,7 +6295,7 @@ def plan_pipeline(task, goal, level, typ):
     lo, hi, nf = LEVEL_SCOPE[level]
     brief = make_brief(task, goal, level)
     STATE["brief"] = brief
-    n_plan = 1 if level <= 3 else (2 if level <= 6 else 3)          # chhota kaam = ek planner
+    n_plan = 1 if (level <= 3 or ready("DSX")) else (2 if level <= 6 else 3)   # DSX ho to akela DSX plan banata hai (GROQ/DS ke plan achhe nahi)          # chhota kaam = ek planner
     gap_rounds = 0 if level <= SMALL_LEVEL else (1 if level <= 6 else PLAN_GAP_ROUNDS)
     max_miss = 2 if level <= 3 else (4 if level <= 6 else 8)
     user = "%s\n\nTASK:\n%s\n\nGOAL: %s\nTYPE: %s\nLEVEL: %d/10 (about %d-%d lines, about %d files)\nEXISTING FILES: %s" % (
@@ -6321,7 +6323,7 @@ def plan_pipeline(task, goal, level, typ):
     for rnd in range(gap_rounds):                   # kuch bacha to nahi?
         if STATE["cancel"]:
             break
-        ck = pick_slots(("GROQ", "DS", "JAAT"), 3)
+        ck = pick_slots(("DSX", "GROQ", "DS", "JAAT"), 4)
         ck = [(n, m) for n, m in ck if fits(n, 6000)][:1]
         if not ck:
             break
@@ -6331,7 +6333,7 @@ def plan_pipeline(task, goal, level, typ):
         if not miss:
             break
         ev("note", text="🔎PLANCHK\n%s\n%s" % (ck[0][0], "\n".join(miss)))
-        fx = pick_slots(("JAAT", "GROQ"), 2)
+        fx = pick_slots(("DSX", "JAAT", "GROQ"), 3)
         fx = [(n, m) for n, m in fx if fits(n, 9000)][:1]
         if not fx:
             break
@@ -6748,14 +6750,94 @@ def ask_user(question, options=None, ctx=""):
             "(pehle @@SEARCH se latest free options dekho), ek line @@NOTE me likho aur seedha kaam shuru karo."), "council"
 
 
+DSX_PLAN = _env("DSX_PLAN", "1") != "0"                  # 0 = LEAN me DSX plan band
+DSX_FINAL = _env("DSX_FINAL", "1") != "0"                # 0 = @@DONE par DSX ki aakhri jaanch band
+DSX_FINAL_MAX = int(_env("DSX_FINAL_MAX", "2"))          # ek kaam me DSX itni baar poora project jaanch kar bug de sakta hai
+DSX_FINAL_CHARS = int(_env("DSX_FINAL_CHARS", "260000"))  # saari files milake itne char tak ek hi baar me (~80k token)
+
+
+def dsx_up():
+    return "DSX" in APIS and ready("DSX") and COOL.get("DSX", 0) <= time.time()
+
+
 def do_understand(task):
     if LEAN:
         STATE["level"] = 0
-    return _do_understand_prev(task)
+    r = _do_understand_prev(task)
+    if LEAN and DSX_PLAN and dsx_up() and len(task.split()) >= 6 and build_intent(task) and STATE.get("utype") in ("", None, "code", "android"):
+        typ = STATE.get("utype") or "code"
+        try:
+            ev("note", text="🗳 DSX plan bana raha hai...")
+            pt = plan_pipeline(STATE.get("task") or task, STATE.get("goal") or task[:200], 4, typ)
+            if pt:
+                r = (r or "") + pt
+        except Exception as e:
+            log("DSX plan galti: %s" % e)
+    return r
+
+
+DSX_FINAL_SYS = ("You are the final reviewer of a finished project. You get ALL source files together with line numbers, plus the TASK. "
+                 "Read everything like a developer doing a last test run in your head before shipping: follow the real flow from start-up to each feature. "
+                 "Report ONLY real defects: syntax errors, crashes, wrong imports/names/signatures between files, config that makes it fail to start or deploy, "
+                 "missing files, and logic that clearly does not do what the TASK asks. Do NOT report style, suggestions, extra features or hardening. "
+                 "Give the exact line from the numbered listing. "
+                 'Reply with ONLY a JSON array, no prose, no code fence: [{"file":"path","line":N,"bug":"what is wrong","fix":"exact change"}]. '
+                 "Reply [] if there is no real defect. Max 10 items, most serious first.")
+
+
+def dsx_final_review():
+    """DSX saari files ek saath padhta hai (ek call). ([bug,...], 'DSX') ya (None, '') agar jawab nahi aaya."""
+    parts, total, skipped = [], 0, []
+    for rel in list_files(None):
+        if not rel.lower().endswith(REVIEW_EXT + (".json", ".md", ".txt", ".yml", ".yaml", ".sh")) and os.path.basename(rel) not in ("Dockerfile", "Procfile"):
+            continue
+        txt = _read(rel, 200000)
+        if not txt.strip():
+            continue
+        if total + len(txt) > DSX_FINAL_CHARS:
+            skipped.append(rel)
+            continue
+        total += len(txt)
+        parts.append("FILE: %s\n%s" % (rel, _numbered(txt)))
+    if not parts:
+        return None, ""
+    user = "TASK:\n%s\n\nDONE CONDITIONS:\n%s\n\n%s%s" % ((STATE.get("task") or "")[:3000], "\n".join(STATE.get("criteria") or []) or "(none)",
+                                                         "\n\n".join(parts), ("\n\n(chhoti jagah ki wajah se ye files nahi dikhayi: %s)" % ", ".join(skipped)) if skipped else "")
+    mdl = models_of(APIS["DSX"])[0]
+    for t in range(2):
+        if STATE["cancel"]:
+            return None, ""
+        cfg = dict(APIS["DSX"], models=[mdl], max_tokens=8192, timeout=300, total_timeout=600)
+        try:
+            res = ask_review("DSX", cfg, DSX_FINAL_SYS, user)
+        except Exception as e:
+            log("DSX final: %s" % e)
+            res = None
+        if res and res[0].strip():
+            d = parse_json_reply(res[0])
+            b = _norm_bugs(d, "")
+            if b is not None:
+                return drop_phantom(b), "DSX"
+        if not nap(3):
+            break
+    return None, ""
 
 
 def done_gate():
-    return pdf_gate() if LEAN else _done_gate_prev()
+    if not LEAN:
+        return _done_gate_prev()
+    if DSX_FINAL and dsx_up():
+        n = TRACK.get("dsx_final_n", 0)
+        if n < DSX_FINAL_MAX:
+            TRACK["dsx_final_n"] = n + 1
+            ev("note", text="🔎 DSX poora project ek saath padh ke aakhri jaanch kar raha hai (%d/%d)..." % (n + 1, DSX_FINAL_MAX))
+            bugs, prov = dsx_final_review()
+            if bugs:
+                show_review("DSX aakhri jaanch", False, "%d bug\n%s" % (len(bugs), bug_text({"project": bugs})), prov)
+                return ("DONE mana (DSX aakhri jaanch %d/%d): saari files ek saath padhne par ye asli bug mile. Har bug @@EDIT se theek karo "
+                        "(galat lage to ek line me wajah likh ke), phir @@DONE:\n%s" % (n + 1, DSX_FINAL_MAX, bug_text({"project": bugs})))
+            show_review("DSX aakhri jaanch", True, "koi asli bug nahi mila" if bugs is not None else "DSX ka jawab nahi aaya", prov)
+    return pdf_gate()
 
 
 def scan_dirty_files():
