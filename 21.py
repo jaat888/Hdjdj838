@@ -8598,7 +8598,7 @@ def project_qa(task):
     for rnd in range(3):
         user = "PLAN:\n%s\n\nCARDS:\n%s\n\n%sUSER KA SAWAL: %s%s" % (plan, cards, ("PICHHLI BAAT:\n" + hist + "\n\n") if hist else "", task, extra)
         got = None
-        for nm in avail(EXPLAIN_PREF, len(QA_SYS) + len(user)):
+        for nm in avail(QA_PREF, len(QA_SYS) + len(user)):
             res = gen_call(nm, QA_SYS, user, mt=1500)
             if res:
                 got = (clean_reply(res[0]).strip(), nm)
@@ -8761,6 +8761,450 @@ def run_agent(task):
     return _run_agent_53(task)
 
 
+# ================= 25/26 (21.py, v5.6): JAAT sirf likhe | baat/sawal: Groq/DS/DAI, padhai: Gemini | shuru me user se poochho | galat bana: Gemini -> DSX =================
+VERSION = "5.6"
+ASK_WAIT = float(_env("ASK_WAIT", "600"))                           # user ke jawab ka intezaar 10 min (phir 3 AI faisla karte hain)
+ASK_FIRST = _env("ASK_FIRST", "1") != "0"                           # 0 = naye kaam par shuru ke sawal band
+CHAT_PREF = ("GROQ", "DS", "DAI", "NV2")                            # sirf baat: JAAT KABHI NAHI
+STUDY_PREF = ("GROQ", "DS", "DAI", "NV2")                           # padhai / GK sawal: Gemini NAHI (uski limit bachao): Groq, DS, DeepAI, NV2
+TRIAGE_PREF = ("GEM2", "GEM", "GEM3", "GROQ", "DS", "NV2")          # dikkat/photo dekhne wala: Gemini fast (GEM2 think=0 pehle)
+QA_PREF = ("GROQ", "NV2", "GEM", "GEM2", "GEM3")                   # project ke sawal: pehle Groq/NV2, Gemini sirf backup
+EXPLAIN_PREF = ("GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2")         # setup samjhana / project ke sawal: JAAT nahi
+EXAM_PREF = ("GEM", "GROQ", "GEM2", "GEM3", "DS")                   # task samajhne wale: JAAT nahi
+
+
+def ask_user(question, options=None, ctx=""):
+    """25: user se SACH me poochho (LEAN me bhi). ASK_USER=0 do to purana 'khud tay karo' wala raasta."""
+    if _env("ASK_USER") == "0":
+        ev("note", text="sawal chhod diya, khud tay kar raha hoon: " + (question or "")[:80])
+        return ("User ko tech ki jaankari nahi, faisla tumhara. Sabse saada raasta lo jo FREE service par chal sake, "
+                "ek line @@NOTE me likho aur seedha kaam shuru karo."), "council"
+    return _ask_user_prev(question, options, ctx)
+
+
+# ---------- A) baat / sawal: JAAT nahi ----------
+NET_NOTE = ("Tumhare paas apna internet / web-search hai (jaise DeepSeek, Gemini ya DeepAI ke app me hota hai): taaza cheez ho (naya version, latest news, kaun kya hai abhi) "
+            "to purani yaad se mat bolo, khud internet par dekh ke bolo.")
+NET_NOTE_EN = ("You have your own internet / web search (like the DeepSeek, Gemini or DeepAI web apps). Before you answer or plan, look up anything that may have changed "
+               "(latest library/framework versions, current free hosting limits, new APIs, recent news) and use the newest approach that really works today.")
+CHAT_SYS = ("Tum Mumbai ho, user ke phone ka dost jaisa sahayak. Hinglish me chhota (1-4 line), seedha aur sach jawab do. Pyaar aur aaram se baat karo. Kisi file/tool ya @@command ki baat mat karo; "
+            "jo pata nahi wo bol do ki pata nahi. " + NET_NOTE)
+STUDY_SYS = ("Tum Mumbai ho, padhai ka dost. JALDI aur saaf aasaan Hinglish me jawab do: pehle seedha jawab, phir zaroorat ho to chhote steps/points (formula, example). "
+             "Aaram aur pyaar se baat karo, bhari bhaarkam shabd nahi. Agar neeche 'INTERNET SE TAAZA JAANKARI' di ho to jawab usi se do. Jo pata nahi wo bol do. "
+             "Kisi file/tool/@@command ki baat mat karo. " + NET_NOTE)
+NOW_RE = re.compile(r"abhi|latest|naya\b|nayi\b|naye\b|\bnew\b|today|\baaj\b|current|recent|news|khabar|price|\brate\b|score|2025|2026|bnna|banna|kaun\s+hai|who\s+is\s+the|"
+                    r"\bcm\b|chief minister|prime minister|\bpm\b|president|kitne\s+(?:state|district|rajya)", re.I)
+QUESTION_STUDY_RE = re.compile(r"\?|\b(?:kya|kaun|kaunsa|kaunsi|kahan|kidhar|kaise|kese|kyu|kyun|kitn\w*|how|what|which|why|who|when|where|explain|samjha\w*|bata\w*|btao|batao|"
+                               r"matlab|meaning|difference|farak|definition|formula|derive|theorem|chapter|notes|physics|chemistry|maths?|biology|history|geography|polity|economics|"
+                               r"grammar|essay|exam|neet|jee|upsc|ssc|padhai|study)\b", re.I)
+
+
+def fast_order(names):
+    """Gemini fast: GEM2 ka pehla model 'gemini-3.6-flash@think=0' hai (bina sochne ke, sabse tez) - wo sabse aage. Baaki ka order wahi."""
+    return sorted(names, key=lambda n: 0 if n == "GEM2" else 1)
+
+
+def small_gen(system, user, mt=500, prefs=None, fast=False):
+    """Baat/sawal ke liye: sirf prefs (default CHAT_PREF) me se. JAAT yahan kabhi nahi aata. fast=True: Gemini ka tez (think=0) wala pehle."""
+    names = avail([p for p in (prefs or CHAT_PREF) if p != "JAAT"], len(system) + len(user))
+    for nm in (fast_order(names) if fast else names):
+        res = gen_call(nm, system, user, mt=mt)
+        if res:
+            return clean_reply(res[0]).strip(), nm
+    return "", ""
+
+
+_route_task_55 = route_task
+
+
+def route_task(task):
+    """'chat' (halki baat) | 'study' (sawal/padhai) | 'qa' (project ke sawal) | 'work'. Sawal kabhi JAAT ke agent loop me nahi jata."""
+    r = _route_task_55(task)
+    t = (task or "").strip()
+    try:
+        if r == "chat":
+            small = len(t.split()) <= 5 and bool(SMALLTALK_RE.search(t))
+            if not small and fresh_images():
+                return "study"                                # photo ke saath baat: Gemini dekhe
+            if not small and len(t.split()) >= 3 and (QUESTION_STUDY_RE.search(t) or NOW_RE.search(t)):
+                return "study"
+            return "chat"
+        if r == "work":
+            if (t and len(t.split()) <= 60 and len(t) <= 600 and "```" not in t and "@@" not in t and not STATE.get("asking")
+                    and not MODE_FORCE_RE.match(t) and not build_intent(t) and not plan_left()
+                    and QUESTION_STUDY_RE.search(t) and not ACTION_RE.search(WEAK_ACT_RE.sub(" ", t))):
+                return "study"                              # asal me sirf sawal hai (banane/badalne/chalane wala shabd nahi)
+    except Exception as e:
+        log("route_task study galti: %s" % e)
+    return r
+
+
+IMG_FRESH_SECS = 900
+IMG_ASK = ("This is a screenshot or photo sent by a non-technical user about their app/software. First transcribe ALL visible text exactly "
+           "(error messages, logs, code, file names, line numbers, button labels). Then say in 2-3 lines what the problem or bug is. Be precise, no guessing.")
+
+
+def fresh_images():
+    """uploads/ ki taaza (15 min) image jo abhi kisi ne padhi nahi."""
+    d, out, seen = os.path.join(WORK, "uploads"), [], STATE.setdefault("img_seen", [])
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []
+    for n in names:
+        p = os.path.join(d, n)
+        try:
+            if os.path.isfile(p) and os.path.splitext(n)[1].lower() in IMG_MIME and n not in seen and time.time() - os.path.getmtime(p) < IMG_FRESH_SECS:
+                out.append((os.path.getmtime(p), n))
+        except OSError:
+            pass
+    return [n for _t, n in sorted(out)][-2:]
+
+
+def read_images(names):
+    """Gemini (vision) se image padho: text + bug. Padhi hui image dobara nahi padhi jaati."""
+    texts = []
+    for n in names:
+        p = os.path.join(WORK, "uploads", n)
+        try:
+            with open(p, "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        STATE.setdefault("img_seen", []).append(n)
+        t = look_image(p, raw, IMG_ASK)
+        if t:
+            texts.append("[PHOTO uploads/%s]\n%s" % (n, clip(t, 2500)))
+    return "\n\n".join(texts)
+
+
+def chat_reply(task, study=False):
+    hist = chat_history()
+    extra = ""
+    imgs = fresh_images() if study else []
+    if imgs:
+        ev("note", text="👁 Gemini aapki photo padh raha hai...", _log=False)
+        extra += "\n\n" + read_images(imgs)
+    if study and NOW_RE.search(task):                       # taaza baat (abhi/latest/naya): pehle internet, purani yaad se nahi
+        try:
+            txt, _c, ok, _x = do_search(clip(task, 160))
+            if ok and txt and not str(txt).startswith(("ERROR", "⏹")):
+                extra = "\n\nINTERNET SE TAAZA JAANKARI:\n" + clip(re.sub(r"\n\(kisi link.*$", "", str(txt), flags=re.S), 2500)
+        except Exception as e:
+            log("study search galti: %s" % e)
+    user = (("Pichhli baat:\n" + hist + "\n\n") if hist else "") + "User: " + task + extra
+    txt, nm = small_gen(STUDY_SYS if study else CHAT_SYS, user, 1500 if study else 700, STUDY_PREF if study else CHAT_PREF)
+    txt = "\n".join(l for l in txt.split("\n") if not l.strip().startswith("@@")).strip()
+    if not txt:
+        return False
+    add("user", task)
+    add("assistant", txt)
+    ev("ai", text=txt, prov=nm)
+    return True
+
+
+def pre_route(task):
+    """True = jawab de diya. Baat/sawal ka jawab na ban paye tab bhi JAAT agent par nahi jaata: saaf error deta hai."""
+    if not PIPE:
+        return False
+    r = route_task(task)
+    if r == "qa":
+        ev("note", text="📖 project ka sawal: cards/plan se (Groq/NV2)", _log=False)
+        if project_qa(task):
+            return True
+        r = "study"
+    if r in ("chat", "study"):
+        ev("note", text=("📚 sawal: Groq/DS/DeepAI se (Gemini nahi)" if r == "study" else "💬 sirf baat: Groq/DS/DeepAI se") + " - JAAT nahi", _log=False)
+        if chat_reply(task, study=(r == "study")):
+            return True
+        ev("err", text="⚠ Groq/DS/Gemini/DeepAI se abhi jawab nahi aaya (limit ya cooldown). Thodi der baad dobara bhejo. (JAAT sirf code likhta hai, baat nahi karta)")
+        add("user", task)
+        return True
+    return False
+
+
+# ---------- B) shuru me user se poochho ----------
+PHONE_RE = re.compile(r"android|\bapk\b|phone|mobile|\bmob\b|play\s*store|termux app", re.I)
+ANDROID_ANS_RE = re.compile(r"android|apk", re.I)
+ASK_DONE_RE = re.compile(r"\[User ke jawab:")
+NAME_STOP = set("eak ek one the and for with app apps application banao bnao banado banana bana bna banaiye banvao make create build develop design mere meri mera "
+                "muja mujhe jo jisme jisse hai ho tha chahiye cheya chahie phone mobile android apk ka ki ke me mein ko se aur ya type new naya nayi simple basic".split())
+PLAN_SYS_PIPE = PLAN_SYS_PIPE + " 9) " + NET_NOTE_EN + " Pick the newest stable, free, working choice and put the exact setup/deploy commands that work today in commands."
+EXPLAIN_SYS = EXPLAIN_SYS + " " + NET_NOTE
+FINAL_SYS_PIPE = FINAL_SYS_PIPE + " If you are unsure whether an API, library call or version exists today, check it on your own internet before you call it a defect."
+ANDROID_RULES = (
+    "\n[ANDROID RULES: Ye ANDROID app hai (phone par install hoga), browser/web app NAHI. Android template ban chuka hai (gradle, AndroidManifest.xml, theme, icon, "
+    ".github/workflows/android.yml): unhe dobara mat likho, sirf zaroorat par badlo (jaise AndroidManifest me permission/activity). Stack = Kotlin + XML layouts + AndroidX + "
+    "RecyclerView (template ki dependencies; extra library chahiye to app/build.gradle.kts me add karo). App ki files: MainActivity.kt (template wali file badlo), naye .kt classes, "
+    "res/layout/*.xml, res/values/strings.xml. Har R.id / R.layout / R.string jo Kotlin me aaye wo res/ me maujood ho: sab ids notes me fix karo. Permissions (media/storage jaisi) "
+    "manifest me likho aur runtime par bhi maango (Android 13+ aur purane dono). APK GitHub Actions banata hai (artifact 'app-debug-apk'): commands.deploy = 'git push' phir Actions tab se APK; "
+    "commands.test me sirf offline check, na ho to khaali. Plan me koi .png/.apk binary file mat daalo. Template ke Gradle/AGP/Kotlin/compileSdk versions purane ho sakte hain: apne internet se latest STABLE aur ek-dusre ke saath compatible versions dekho; "
+    "pakka ho tabhi settings/build.gradle.kts aur workflow ke gradle-version me badlo, warna template ke versions rehne do.]")
+
+
+def app_name_for(task):
+    """Task se app ka chhota naam (template ke liye). Na mile to 'My App'."""
+    t = re.split(r"\[User ke jawab|\[ANDROID", task or "")[0]
+    ws = [w for w in re.findall(r"[A-Za-z]{3,}", t) if w.lower() not in NAME_STOP and not _near(w.lower(), BUILD_VERBS)]
+    return " ".join(w.capitalize() for w in ws[:3]) or "My App"
+
+
+def build_questions(task):
+    """Shuru ke sawal: platform (agar user ne nahi bataya), language (sirf terminal/bot me), aur ek khaas cheez. Max 3."""
+    qs = []
+    if not (RUN_SAID_RE.search(task or "") or PHONE_RE.search(task or "")):
+        qs.append({"q": "Ye kahan chalega? (phone ka app chahiye to Android chuno)", "options": ["Android app (phone, APK)", "Web page (browser)", "Terminal / Bot / Script", "Tum chuno"], "key": "platform"})
+    qs.append({"q": "Kitna bada banau? Koi khaas cheez jo zaroor chahiye ho to neeche likh do.", "options": ["Simple (basic)", "Zyada features", "Tum chuno"], "key": "size"})
+    return qs[:3]
+
+
+def wants_questions(task):
+    t = task or ""
+    return bool(ASK_FIRST and build_intent(t) and not ASK_DONE_RE.search(t) and not MODE_FORCE_RE.match(t) and "```" not in t and "@@" not in t
+                and not project_has_files() and not STATE.get("asking"))
+
+
+def ask_first(task):
+    """(task + jawab, platform, stop?). platform = 'android' | ''."""
+    answers, plat = [], ("android" if (ANDROID_TASK_RE.search(task) or PHONE_RE.search(task)) else "")
+    for q in build_questions(task):
+        ans, how = ask_user(q["q"], q["options"], ctx="Task: " + task[:500])
+        if how == "stop":
+            return task, plat, True
+        answers.append("%s -> %s" % (q["q"], ans))
+        if q["key"] == "platform":
+            plat = "android" if ANDROID_ANS_RE.search(ans or "") else ""
+            if not plat and re.search(r"terminal|bot|script", ans or "", re.I) and not LANG_SAID_RE.search(task):
+                a2, h2 = ask_user("Kaunsi language me banau?", ["Python", "JavaScript", "Tum chuno"], ctx="Task: " + task[:500])
+                if h2 == "stop":
+                    return task, plat, True
+                answers.append("Kaunsi language me banau? -> %s" % a2)
+    return task + ("\n[User ke jawab: %s]" % " | ".join(answers) if answers else ""), plat, False
+
+
+def android_prepare(task_plain):
+    """Android template (gradle, manifest, theme, icon, GitHub Actions) pehle banao: pipeline ab sirf app ki files likhegi."""
+    name = app_name_for(task_plain)
+    ev("note", text="📱 Android app: pehle template (gradle, manifest, GitHub Actions) bana raha hoon, phir DSX plan, JAAT likhega")
+    res, made, ok, _c = do_template("android " + name)
+    ev("step", kind="TEMPLATE", arg="android " + name, out=clip(res, 700), ok=bool(ok), prov="mumbai")
+    wl("TEMPLATE android %s" % name)
+    return ANDROID_RULES
+
+
+def run_pipeline_for(task_plain, task_for_plan, plat):
+    """True = nipta; False = pipeline plan nahi bana paya (purana agent loop)."""
+    STATE["task"] = task_plain
+    ev("note", text="🧭 bada kaam: DSX plan banayega, JAAT file-file ek saath likhega, aakhir me DSX poora project jaanchega")
+    r = pipeline_entry(task_for_plan)
+    if STATE["cancel"]:
+        pipe_save()
+        ev("note", text="⏹ roka gaya")
+        return True
+    if r is None:
+        return False
+    return pipe_conclude(task_plain, True)
+
+
+# ---------- C) user ki dikkat / shikayat / photo: Gemini (fast) pehle dekhe -> bada ulta-pulta ho to DSX ko mote jankari, chhota ho to khud bataye ----------
+COMPLAINT_RE = re.compile(r"galat\s*(?:bana|bna|banaya)|\bwrong\b|ye\s*nahi|yeh\s*nahi|(?:nhi|nahi)\s*(?:muja|mujhe|mena|maine|mere|mera)|"
+                          r"(?:muja|mujhe|mena|maine)\b.{0,50}\b(?:cheya|chahiye|chaiye|chahie|chahta|chahti|wanted)|\b(?:cheya|chahiye|chaiye|chahie)\s*(?:tha|thi)\b|i\s*wanted|not\s*what\s*i", re.I)
+TRIAGE_SYS = (
+    "You are the first helper of a NON-TECHNICAL user who is building software with an AI team (DSX = the lead architect who plans, JAAT = the one who types code). "
+    "The user reports a problem: something built wrong, a bug, an error, or sent a photo/screenshot. Decide quickly and calmly. Use the OLD TASK, WHAT WAS BUILT, CHAT, "
+    "NEW MESSAGE and PHOTO TEXT (text read from the user's photo, may be empty). " + NET_NOTE_EN + " Reply ONLY JSON, no prose: "
+    '{"severity":"major|minor|question",'
+    '"platform":"android|web|cli|bot|other|unknown",'
+    '"task":"for major: one full clear paragraph in English: what the user REALLY wants built (platform + every feature named or implied)",'
+    '"wrong":"one line: what was built wrong or what is broken",'
+    '"bug":"exact bug from the message or photo: error text, file, line if visible (empty if none)",'
+    '"brief_for_dsx":"for major: ONLY the rough picture for DSX in 3-6 short lines (what the user wanted, what is wrong, what must change). Not the full logs.",'
+    '"fix":"for minor: exact instruction for the coder: which file/function and what to change",'
+    '"reply":"2-5 lines in friendly calm Hinglish to the user: what you understood (say it in simple words) and what will happen next. Never blame the user, no jargon.",'
+    '"question":"ONE short question ONLY if something essential is unclear, else empty string"}. '
+    "severity: major = almost everything is upside down (wrong platform like a web page instead of an Android app, wrong idea, many parts wrong) so the plan must be redone. "
+    "minor = small bug, typo, one wrong button/colour/behaviour, small change - the existing code just needs a small fix. "
+    "question = the user only asks something or wants an explanation (also reading a photo for them), nothing needs changing. For minor and question you answer yourself; do NOT involve DSX.")
+
+
+def is_triage(task, has_img):
+    t = (task or "").strip()
+    if not t or "@@" in t or len(t) > 6000 or MODE_FORCE_RE.match(t) or STATE.get("asking") or is_continue(t):
+        return False
+    if not (STATE.get("task") or project_has_files()):
+        return False
+    if "```" not in t and len(t.split()) <= 80 and COMPLAINT_RE.search(t):
+        return True
+    if has_img or BUGONLY_RE.search(t):
+        return True
+    return False
+
+
+def archive_old():
+    """Purani (galat) files uploads/old_<time>/ me rakh do (hatati nahi): naya kaam saaf folder par, purana safe. uploads/ aage ki jaanch me nahi aata."""
+    dst = os.path.join("uploads", time.strftime("old_%m%d_%H%M%S"))
+    moved = 0
+    for rel in list_files(None):
+        if rel.split(os.sep, 1)[0] == "uploads" or rel.lower().endswith(".zip"):
+            continue
+        try:
+            to = safe(os.path.join(dst, rel))
+            os.makedirs(os.path.dirname(to), exist_ok=True)
+            shutil.move(safe(rel), to)
+            moved += 1
+        except (OSError, ValueError) as e:
+            log("archive_old %s: %s" % (rel, e))
+    for root, dirs, files in os.walk(WORK, topdown=False):                      # khaali folder hata do
+        if root != WORK and not os.listdir(root) and os.path.relpath(root, WORK).split(os.sep, 1)[0] not in ("uploads", ".mumbai"):
+            try:
+                os.rmdir(root)
+            except OSError:
+                pass
+    return dst, moved
+
+
+def triage(task):
+    """True = nipta (jawab de diya / pipeline chali / roka gaya). False = purane raaste par jao; STATE['task_override'] me Gemini ka hint ho sakta hai."""
+    old = STATE.get("task") or ""
+    bp = (PIPE_ST.get("bp") if PIPE_ST else None) or (pipe_load() or {}).get("bp") or {}
+    built = ("%s | stack: %s | files: %s" % (bp.get("summary", ""), bp.get("stack", ""), ", ".join(f["path"] for f in (bp.get("files") or [])[:15]))
+             if bp else ", ".join(f for f in list_files(40) if f.split(os.sep, 1)[0] != "uploads")) or "(pata nahi)"
+    imgs = fresh_images()
+    img_txt = ""
+    if imgs:
+        ev("note", text="👁 Gemini aapki photo padh raha hai (error/bug kya hai)...")
+        img_txt = read_images(imgs)
+    ev("note", text="🧠 Gemini (fast) aapki dikkat dekh raha hai; bada ulta-pulta hua to DSX ko mote jankari jayegi, chhota hua to Gemini khud batayega", _log=False)
+    user = "OLD TASK:\n%s\n\nWHAT WAS BUILT:\n%s\n\nCHAT:\n%s\n\nPHOTO TEXT:\n%s\n\nNEW MESSAGE FROM USER:\n%s" % (
+        clip(re.split(r"\[ANDROID", old)[0], 1500), clip(built, 1200), recent_chat(8, 400) or "-", clip(img_txt, 2500) or "-", clip(task, 2500))
+    txt, nm = small_gen(TRIAGE_SYS, user, 1500, TRIAGE_PREF, fast=True)
+    d = parse_json_reply(txt) if txt else None
+    if not isinstance(d, dict):
+        if img_txt:                                         # Gemini ka JSON nahi aaya par photo padh li: purane agent ko photo ka text do
+            STATE["task_override"] = task + "\n\n" + img_txt
+        return False
+    sev = str(d.get("severity") or "").strip().lower()
+    reply = clip(str(d.get("reply") or "").strip(), 900)
+    bug = clip(str(d.get("bug") or "").strip(), 500)
+    wrong = clip(str(d.get("wrong") or "").strip(), 300)
+    if reply:
+        ev("ai", text=reply, prov=nm)
+    ev("note", text="🧠 %s ne dekha: %s%s" % (nm, {"major": "bahut kuch galat (DSX naya plan banayega)", "minor": "chhoti dikkat (Gemini ne bataya, JAAT theek karega)",
+                                                  "question": "sirf jaankari (Gemini ne khud bataya)"}.get(sev, sev), (" | bug: " + bug) if bug else ""), _log=False)
+    if sev == "question":
+        if not reply:
+            return False
+        add("user", task)
+        add("assistant", reply)
+        return True
+    if sev != "major":                                       # minor (ya samajh na aaya): Gemini ne bata diya, JAAT chhota fix type kare
+        fx = clip(str(d.get("fix") or bug or wrong).strip(), 800)
+        STATE["task_override"] = ("CHHOTA FIX (Gemini ne jaanch ke bataya): %s\nUser ne kaha: %s%s" % (fx or "user ki baat dekho", clip(task, 1500), ("\n\n" + img_txt) if img_txt else ""))
+        return False
+    # ---- major: platform tay, zaroorat par ek sawal, phir DSX ko MOTI jankari ----
+    plat = str(d.get("platform") or "unknown").lower()
+    want = str(d.get("task") or "").strip() or (clip(old, 400) + " | USER KI NAYI BAAT: " + clip(task, 600))
+    if plat == "unknown" and PHONE_RE.search(task):
+        plat = "android"
+    q = str(d.get("question") or "").strip()
+    if q:
+        ans, how = ask_user(q, [], ctx="Task: " + want[:400])
+        if how == "stop":
+            return True
+        want += " | USER KA JAWAB (%s): %s" % (q, ans)
+        if plat == "unknown" and ANDROID_ANS_RE.search(ans or ""):
+            plat = "android"
+    if plat == "unknown" and not q:
+        ans, how = ask_user("Aap ye kahan chalana chahte ho?", ["Android app (phone, APK)", "Web page (browser)", "Terminal / Bot / Script"], ctx="Task: " + want[:400])
+        if how == "stop":
+            return True
+        plat = "android" if ANDROID_ANS_RE.search(ans or "") else "other"
+        want += " | USER KA JAWAB: platform -> %s" % ans
+    is_and = plat == "android"
+    rebuild = project_has_files() and is_and != is_android_project(list_files(None))      # platform badla (jaise web -> Android): naye sire se
+    if rebuild:
+        dst, n = archive_old()
+        ev("note", text="📦 purani galat files (%d) %s me rakh di (hatayi nahi); naya kaam saaf folder par" % (n, dst))
+    brief = clip(str(d.get("brief_for_dsx") or "").strip(), 700)
+    plain = want + "\n[User ke jawab: platform -> %s | shikayat -> %s]" % ("Android app" if is_and else plat, clip(task, 200))
+    plan_task = (plain + "\n[GEMINI KI RAY - DSX ke liye mote jankari (aap khud sahi plan tay karo): %s | galat bana: %s%s]" % (
+        brief or "-", wrong or "-", (" | bug: " + bug) if bug else "")) + (android_prepare(plain) if is_and else "")
+    PIPE_ST.clear()
+    STATE["pipe_summary"] = None
+    ok = run_pipeline_for(plain, plan_task, "android" if is_and else "")
+    if not ok:
+        STATE["task_override"] = plain + (ANDROID_RULES if is_and else "")
+    return ok
+
+
+# ---------- D) front: complaint -> baat/sawal -> shuru ke sawal -> pipeline ----------
+def pipe_front(task):
+    """True = Mumbai ne khud nipta diya. False = purana agent loop (JAAT likhta/badalta hai; baat/sawal yahan kabhi nahi aate)."""
+    if not PIPE:
+        return False
+    try:
+        if is_continue(task) and STATE.get("task"):
+            d = pipe_pending()
+            if not d:
+                return False
+            STATE["pipe_summary"] = None
+            pipe_resume(d)
+            return pipe_conclude(task, False)
+        if is_triage(task, bool(fresh_images())):
+            try:
+                if triage(task):
+                    return True
+            except Exception as e:
+                log("triage galti: %s\n%s" % (e, traceback.format_exc()[-500:]))
+            if STATE["cancel"]:
+                return True
+            if STATE.get("task_override"):
+                return False                                # Gemini ne chhota fix bata diya: JAAT type karega
+        if pre_route(task):
+            return True
+        if STATE["cancel"]:
+            return True
+        if wants_questions(task):
+            full, plat, stop = ask_first(task)
+            if stop or STATE["cancel"]:
+                return True
+            plan_task = full + (android_prepare(full) if plat == "android" else "")
+            PIPE_ST.clear()
+            STATE["pipe_summary"] = None
+            if run_pipeline_for(full, plan_task, plat):
+                return True
+            STATE["task_override"] = full + (ANDROID_RULES if plat == "android" else "")
+            return False
+        if pipe_eligible(task):
+            STATE["task"] = task
+            ev("note", text="🧭 bada kaam: DSX plan banayega, JAAT file-file ek saath likhega, aakhir me DSX poora project jaanchega")
+            r = pipeline_entry(task)
+            if STATE["cancel"]:
+                pipe_save()
+                ev("note", text="⏹ roka gaya")
+                return True
+            if r is None:
+                return False
+            return pipe_conclude(task, True)
+    except Exception as e:
+        log("pipe_front galti: %s\n%s" % (e, traceback.format_exc()[-700:]))
+        if project_has_files():
+            ev("err", text="⚠ pipeline me galti (%s: %s). Jo files ban chuki hain wo safe hain; 'aage badho' likho." % (type(e).__name__, str(e)[:120]))
+            return True
+    return False
+
+
+def run_agent(task):
+    """PIPE chalu ho to pehle pipe_front; False aaye to purana agent loop (task_override me shuru ke sawalon ke jawab saath)."""
+    if PIPE:
+        track_reset()
+        UNDO_STACK.append({})
+        del UNDO_STACK[:-10]
+        if pipe_front(task):
+            return
+        if UNDO_STACK:
+            UNDO_STACK.pop()                       # purana run_agent apni entry khud banata hai
+    return _run_agent_53(STATE.pop("task_override", None) or task)
 
 if __name__ == "__main__":
     if "--setup" in sys.argv:
