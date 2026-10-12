@@ -36,7 +36,7 @@ def _env(name, default=""):
 #   min_gap    is provider par do request ke beech kam se kam itne second
 #   rate_cool  429/limit aane par itne second aaram (Gemini ka lock ~2 ghante => 7200)
 #   retry_429  429 aane par usi provider ko itni baar (ruk ke) dobara try karo, phir hi cooldown (default 1)
-PRIORITY = ["JAAT", "GEM", "GEM2", "GEM3", "DS", "GROQ", "NV2", "DAI", "UAI", "DSX"]
+PRIORITY = ["JAAT", "GEM", "GEM2", "GEM3", "DS", "GROQ", "NV2", "MIMO26", "MIMO25", "DSF41", "DSF4", "DAI", "UAI", "DSX", "HAIKU"]
 DISABLED = set()            # DSX wapas aa gaya: chalu (⚙ AI panel se chahe to band karo)
 APIS = {
     "JAAT": {                      # JAAT (main, sabse zyada yahi chalega). Ek time par 1 request; 429 par 2 baar retry, cooldown bahut kam
@@ -154,6 +154,32 @@ APIS = {
         "rate_cool": 120,          # 429/limit par 2 min aaram
     },
 }
+
+# ---- rev9.top (OpenAI jaisa /v1/chat/completions). Har model alag provider => ⚙ AI panel me har ek ka alag ON/OFF ----
+# Key/URL badalni ho to environment: REV_KEY, REV_BASE. HAIKU = DSX band/cooldown me ho to uski jagah plan + aakhri jaanch karta hai.
+REV_BASE = _env("REV_BASE", "https://rev9.top/v1")
+REV_KEY = _env("REV_KEY", "mgw_6mk9mnuUvEZp_Md-axteDysQOa0_sKYJSpRtJADYDh4")
+for _n, _m, _grp, _tier, _gap in (
+        ("MIMO26", "mimo-v2.6-flash:free", "rev9", "cheap", 1),
+        ("MIMO25", "mimo-v2.5:free", "rev9", "cheap", 1),
+        ("DSF41", "deepseek-v4.1-flash:free", "rev9", "cheap", 1),
+        ("DSF4", "deepseek-v4-flash:free", "rev9", "cheap", 1),
+        ("HAIKU", "claude-haiku-5.5:free", "haiku", "strong", 2)):
+    APIS[_n] = {
+        "type": "oai",
+        "base": REV_BASE,
+        "key": REV_KEY,
+        "models": [_m],
+        "timeout": 240,
+        "total_timeout": 900,
+        "group": _grp,
+        "tier": _tier,
+        "max_conc": 2,
+        "min_gap": _gap,
+        "rate_cool": 60,
+        "retry_429": 1,
+        "max_tokens": 16000,       # server mana kare to ask_oai asli hadd seekh leta hai (LEARN_MT)
+    }
 
 # ---- bada jawab (token) + image dekhna: JAAT aur Gemini (conf se badal sakte ho) ----
 for _n, _tok in (("JAAT", 10400), ("GEM", 60000), ("GEM2", 8192), ("GEM3", 60000)):   # JAAT ~10,600 token par kat jata hai; GEM2 32000 par 502 deta hai (test se pata chala)
@@ -370,7 +396,7 @@ ROT = {}                   # group -> ginti (baari-baari ke liye)
 COOL_FILE = os.path.join(ROOT, ".mumbai", "cool.json")      # restart/rebuild ke baad bhi lock yaad rahe
 CONF_FILE = os.path.join(ROOT, ".mumbai", "providers.json")  # bina rebuild ke provider badalne ki file
 _CONF_MT = [0.0]
-CONF_VER = 20              # purani providers.json ka priority (JAAT pehle, DSX last) naye order ko na bigaade
+CONF_VER = 21              # purani providers.json ka priority (JAAT pehle, DSX last) naye order ko na bigaade
 CONF_KEYS = ("type", "base", "key", "models", "timeout", "total_timeout", "max_chars", "max_url", "max_ctx",
              "max_tokens", "vision", "tier", "group", "max_conc", "min_gap", "rate_cool", "retry_429", "no_system")
 
@@ -5715,7 +5741,7 @@ function drawPlan(){if(!planBox)return;var done=planBox.items.filter(function(x)
 function toggleMenu(ev){ev.stopPropagation();var m=document.getElementById('menu');m.style.display=m.style.display=='block'?'none':'block'}
 function mnu(a){document.getElementById('menu').style.display='none';if(a=='conf')openConf();else if(a=='files')openFiles();else actPost(a)}
 document.addEventListener('click',function(){var m=document.getElementById('menu');if(m)m.style.display='none'});
-var NOISE=/(HTTP\s?\d{3}|\b429\b|rate.?limit|bheed|aaram|ruk ke dobara|org_\w+|cooldown)/i,PROV=/^(JAAT|GEM\d?|GROQ|DS|NV2|DAI|UAI)\b/;
+var NOISE=/(HTTP\s?\d{3}|\b429\b|rate.?limit|bheed|aaram|ruk ke dobara|org_\w+|cooldown)/i,PROV=/^(JAAT|GEM\d?|GROQ|DS|NV2|DAI|UAI|DSX|HAIKU|MIMO\d+|DSF\d+)\b/;
 var act=null,actBody=null,actN=0,lastAi=null,doneShown=false,stopping=false,curLevel=0,curPlan=[0,0];
 function actBox(){if(!act){act=el('details','step act');act.appendChild(el('summary',null,'Kaam chal raha hai'));actBody=el('div','actb');act.appendChild(actBody);actN=0;chat.appendChild(act)}return actBody}
 function actSay(t){if(!act)return;actN++;act.firstChild.textContent=t+(actN>1?'  \u00b7  '+actN+' kadam':'')}
@@ -6268,8 +6294,8 @@ def setup():
 CODE_FLOW = _env("CODE_FLOW", "1") != "0"        # 0 = purana flow
 SCAN_ON_CHECK = True                             # code/android me review har @@EDIT par nahi, file poori hone par (@@CHECK / @@DONE)
 EXAM_PREF = ("JAAT", "GEM", "GROQ", "GEM2", "GEM3", "DS")   # task dekhne wale (pehle 2 jo jawab dein)
-PLANNER_PREF = ("DSX", "JAAT", "GROQ", "DS", "NV2", "DAI", "UAI")   # plan banane wale 3
-MERGER_PREF = ("DSX", "GEM", "GEM2", "GEM3", "JAAT")       # plan jodne wala: Gemini
+PLANNER_PREF = ("DSX", "HAIKU", "JAAT", "GROQ", "DS", "NV2", "DAI", "UAI")   # plan banane wale 3
+MERGER_PREF = ("DSX", "HAIKU", "GEM", "GEM2", "GEM3", "JAAT")       # plan jodne wala: Gemini
 SCAN_PREF = ("JAAT", "GROQ")                        # poori file wale scanner (2): JAAT, Groq. DS alag (bade prompt par tukdon me). NV2/DAI sirf tab jab DS bhi na ho
 SCAN_BACKUP = ("NV2", "DAI", "UAI")
 DS_PARTS_MAX = 6                                      # DS badi file ke itne tukde tak scan karta hai
@@ -6476,7 +6502,7 @@ def plan_pipeline(task, goal, level, typ):
     lo, hi, nf = LEVEL_SCOPE[level]
     brief = make_brief(task, goal, level)
     STATE["brief"] = brief
-    n_plan = 1 if (level <= 3 or ready("DSX")) else (2 if level <= 6 else 3)   # DSX ho to akela DSX plan banata hai (GROQ/DS ke plan achhe nahi)          # chhota kaam = ek planner
+    n_plan = 1 if (level <= 3 or ready("DSX") or ready("HAIKU")) else (2 if level <= 6 else 3)   # DSX ho to akela DSX plan banata hai (GROQ/DS ke plan achhe nahi)          # chhota kaam = ek planner
     gap_rounds = 0 if level <= SMALL_LEVEL else (1 if level <= 6 else PLAN_GAP_ROUNDS)
     max_miss = 2 if level <= 3 else (4 if level <= 6 else 8)
     user = "%s\n\nTASK:\n%s\n\nGOAL: %s\nTYPE: %s\nLEVEL: %d/10 (about %d-%d lines, about %d files)\nEXISTING FILES: %s" % (
@@ -6504,7 +6530,7 @@ def plan_pipeline(task, goal, level, typ):
     for rnd in range(gap_rounds):                   # kuch bacha to nahi?
         if STATE["cancel"]:
             break
-        ck = pick_slots(("DSX", "GROQ", "DS", "JAAT"), 4)
+        ck = pick_slots(("DSX", "HAIKU", "GROQ", "DS", "JAAT"), 4)
         ck = [(n, m) for n, m in ck if fits(n, 6000)][:1]
         if not ck:
             break
@@ -6514,7 +6540,7 @@ def plan_pipeline(task, goal, level, typ):
         if not miss:
             break
         ev("note", text="🔎PLANCHK\n%s\n%s" % (ck[0][0], "\n".join(miss)))
-        fx = pick_slots(("DSX", "JAAT", "GROQ"), 3)
+        fx = pick_slots(("DSX", "HAIKU", "JAAT", "GROQ"), 3)
         fx = [(n, m) for n, m in fx if fits(n, 9000)][:1]
         if not fx:
             break
@@ -6937,8 +6963,12 @@ DSX_FINAL_MAX = int(_env("DSX_FINAL_MAX", "2"))          # ek kaam me DSX itni b
 DSX_FINAL_CHARS = int(_env("DSX_FINAL_CHARS", "1200000"))  # saari files milake itne char tak ek hi baar me (~300-400k token)
 
 
+def _up(n):
+    return n in APIS and ready(n) and COOL.get(n, 0) <= time.time()
+
+
 def dsx_up():
-    return "DSX" in APIS and ready("DSX") and COOL.get("DSX", 0) <= time.time()
+    return _up("DSX") or _up("HAIKU")          # DSX band ho to Claude Haiku uski jagah
 
 
 def do_understand(task):
@@ -6984,13 +7014,14 @@ def dsx_final_review():
         return None, ""
     user = "TASK:\n%s\n\nDONE CONDITIONS:\n%s\n\n%s%s" % ((STATE.get("task") or "")[:3000], "\n".join(STATE.get("criteria") or []) or "(none)",
                                                          "\n\n".join(parts), ("\n\n(chhoti jagah ki wajah se ye files nahi dikhayi: %s)" % ", ".join(skipped)) if skipped else "")
-    mdl = models_of(APIS["DSX"])[0]
+    who = "DSX" if _up("DSX") else "HAIKU"
+    mdl = models_of(APIS[who])[0]
     for t in range(2):
         if STATE["cancel"]:
             return None, ""
-        cfg = dict(APIS["DSX"], models=[mdl], max_tokens=8192, timeout=300, total_timeout=600)
+        cfg = dict(APIS[who], models=[mdl], max_tokens=8192, timeout=300, total_timeout=600)
         try:
-            res = ask_review("DSX", cfg, DSX_FINAL_SYS, user)
+            res = ask_review(who, cfg, DSX_FINAL_SYS, user)
         except Exception as e:
             log("DSX final: %s" % e)
             res = None
@@ -6998,7 +7029,7 @@ def dsx_final_review():
             d = parse_json_reply(res[0])
             b = _norm_bugs(d, "")
             if b is not None:
-                return drop_phantom(b), "DSX"
+                return drop_phantom(b), who
         if not nap(3):
             break
     return None, ""
@@ -7049,11 +7080,11 @@ PIPE_EXACT_MAX = int(_env("PIPE_EXACT_MAX", "2"))                   # wahi bug 2
 PIPE_STEP_LINES = int(_env("PIPE_STEP_LINES", "500"))               # JAAT ek file me itni line se zyada nahi likh paata (~10k token)
 PIPE_FILES_MAX = 25
 PIPE_OUT = int(_env("PIPE_OUT_TOKENS", "64000"))                    # plan / bug-list / exact-fix me jawab ki upari hadd (provider ki apni hadd se zyada nahi jaata)
-PLAN_PREF = ("DSX", "GEM", "GEM2", "GEM3", "JAAT")                  # plan: DSX, band ho to Gemini, phir JAAT
+PLAN_PREF = ("DSX", "HAIKU", "GEM", "GEM2", "GEM3", "JAAT")                  # plan: DSX, band ho to Gemini, phir JAAT
 WRITE_PREF = ("JAAT", "GEM", "GEM2", "GEM3", "NV2")                 # likhai: JAAT, band ho to Gemini
 FIX_PREF = ("JAAT", "GEM", "GEM2", "GEM3", "NV2")                   # bug theek karna: JAAT
 CHECK_PREF = ("DS", "GROQ", "NV2")                                  # chhoti jaanch + "bug gaya ya nahi" confirm
-FINAL_PREF = ("DSX", "GEM", "GEM2", "GEM3", "JAAT")                 # poore project ki aakhri jaanch
+FINAL_PREF = ("DSX", "HAIKU", "GEM", "GEM2", "GEM3", "JAAT")                 # poore project ki aakhri jaanch
 EXPLAIN_PREF = ("GEM", "GEM2", "GEM3", "JAAT", "NV2", "GROQ")       # end me setup samjhane wale
 CHAT_PREF = ("DS", "GROQ", "NV2")                                   # sirf baat / chhota sawal
 PIPE_ST = {}                                                        # chalti pipeline ki halat (disk par .mumbai/pipe.json me bhi)
