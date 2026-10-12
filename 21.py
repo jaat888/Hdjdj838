@@ -7,6 +7,7 @@ Environment variables (blitz me daalo):
   NTFY_TOPIC        (optional) ntfy app ka topic, ya TG_TOKEN + TG_CHAT (Telegram): kaam khatam hone par phone par message
   BRAVE_KEY         (optional) @@SEARCH ke liye Brave Search; na do to DuckDuckGo se chalta hai
   MUMBAI_PASSWORD   (optional) login password, na do to 8888
+  /admin            (sirf owner) ghar walon ke liye guest password banao: expiry, band/chalu, naya password. Guest sirf chat kar sakta hai.
   PORT              blitz khud deta hai (na ho to 8011)
   DATA_DIR          (optional) projects ka folder, default ~/mumbai_work
   ALLOWED_HOSTS     (optional) sirf ye domain maane, comma se alag
@@ -36,7 +37,7 @@ def _env(name, default=""):
 #   min_gap    is provider par do request ke beech kam se kam itne second
 #   rate_cool  429/limit aane par itne second aaram (Gemini ka lock ~2 ghante => 7200)
 #   retry_429  429 aane par usi provider ko itni baar (ruk ke) dobara try karo, phir hi cooldown (default 1)
-PRIORITY = ["JAAT", "GEM", "GEM2", "GEM3", "DS", "GROQ", "NV2", "MIMO26", "MIMO25", "DSF41", "DSF4", "DAI", "UAI", "DSX", "HAIKU"]
+PRIORITY = ["JAAT", "GEM", "GEM2", "GEM3", "DS", "GROQ", "NV2", "MIMO26", "MIMO25", "DSF41", "DSF4", "DAI", "UAI", "HAIKU", "DSX"]
 DISABLED = set()            # DSX wapas aa gaya: chalu (⚙ AI panel se chahe to band karo)
 APIS = {
     "JAAT": {                      # JAAT (main, sabse zyada yahi chalega). Ek time par 1 request; 429 par 2 baar retry, cooldown bahut kam
@@ -274,6 +275,184 @@ def check_password(pw):
 
 
 auth_load()
+
+# ---------- guest accounts: ghar walon ke liye alag password (sirf chat, keys/config/shell tak koi pahunch nahi) ----------
+GUEST_FILE = os.path.join(ROOT, ".mumbai", "guests.json")
+GUESTS = {}                      # gid -> {name, salt, h, tv, exp(0=kabhi nahi), off, made, last, n}
+GLOCK = threading.Lock()
+GSEC = ("mumbai-guest|" + _env("SESSION_SECRET", PASSWORD)).encode()
+G_MAX_CHARS = 20000              # guest ek request me itna hi text bhej sakta hai
+
+
+def _ghash(pw, salt):
+    return hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8", "replace"), bytes.fromhex(salt), 60000).hex()
+
+
+def guests_load():
+    try:
+        with open(GUEST_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            GUESTS.clear()
+            GUESTS.update(d)
+    except (OSError, ValueError):
+        pass
+
+
+def guests_save():
+    try:
+        with open(GUEST_FILE + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(GUESTS, f)
+        os.chmod(GUEST_FILE + ".tmp", 0o600)
+        os.replace(GUEST_FILE + ".tmp", GUEST_FILE)
+    except OSError as e:
+        print("guests.json save fail:", e)
+
+
+def guest_ok(g):
+    return bool(g) and not g.get("off") and (not g.get("exp") or g["exp"] > time.time())
+
+
+def _guest_setpw(g, pw):
+    g["salt"] = os.urandom(16).hex()
+    g["h"] = _ghash(pw, g["salt"])
+    g["tv"] = os.urandom(8).hex()             # badalte hi purani login cookie bekaar
+
+
+def guest_find(pw):
+    """password se guest id (ya None). Band/expire guest bhi mil jata hai, taaki sahi message de sakein."""
+    with GLOCK:
+        for gid, g in GUESTS.items():
+            if hmac.compare_digest(_ghash(pw, g["salt"]), g["h"]):
+                return gid
+    return None
+
+
+def guest_token(gid):
+    g = GUESTS[gid]
+    return gid + "." + hmac.new(GSEC, (gid + "|" + g["tv"]).encode(), hashlib.sha256).hexdigest()
+
+
+def guest_from_token(tok):
+    gid, _, sig = (tok or "").partition(".")
+    with GLOCK:
+        g = GUESTS.get(gid)
+        if not g:
+            return None
+        want = hmac.new(GSEC, (gid + "|" + g["tv"]).encode(), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(sig.encode("utf-8", "replace"), want.encode()) and guest_ok(g):
+            return gid
+    return None
+
+
+def guest_touch(gid):
+    with GLOCK:
+        g = GUESTS.get(gid)
+        if g:
+            g["last"], g["n"] = int(time.time()), int(g.get("n", 0)) + 1
+            guests_save()
+
+
+def guest_list():
+    with GLOCK:
+        return [{"id": i, "name": g["name"], "exp": g.get("exp", 0), "off": bool(g.get("off")), "ok": guest_ok(g),
+                 "last": g.get("last", 0), "n": g.get("n", 0), "made": g.get("made", 0)}
+                for i, g in sorted(GUESTS.items(), key=lambda x: x[1].get("made", 0))]
+
+
+def _pw_taken(pw, skip=None):
+    if hmac.compare_digest(pw.encode("utf-8", "replace"), PASSWORD.encode("utf-8", "replace")):
+        return True
+    return any(hmac.compare_digest(_ghash(pw, g["salt"]), g["h"]) for i, g in GUESTS.items() if i != skip)
+
+
+def _new_pw():
+    import secrets
+    return "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(8))
+
+
+def guest_add(name, pw, days):
+    name = str(name or "").strip()[:30]
+    if not name:
+        raise ValueError("naam likho")
+    pw = str(pw or "").strip() or _new_pw()
+    if len(pw) < 6:
+        raise ValueError("password kam se kam 6 akshar ka ho")
+    with GLOCK:
+        if _pw_taken(pw):
+            raise ValueError("ye password pehle se kisi ka hai, doosra rakho")
+        gid = os.urandom(4).hex()
+        g = {"name": name, "exp": int(time.time() + days * 86400) if days and days > 0 else 0,
+             "off": False, "made": int(time.time()), "last": 0, "n": 0}
+        _guest_setpw(g, pw)
+        GUESTS[gid] = g
+        guests_save()
+    return {"id": gid, "name": name, "password": pw}
+
+
+def guest_set(gid, b):
+    with GLOCK:
+        g = GUESTS.get(gid)
+        if not g:
+            raise ValueError("guest nahi mila")
+        out = {}
+        if "off" in b:
+            g["off"] = bool(b["off"])
+        if "days" in b:                                   # abhi se N din; 0 = kabhi expire nahi
+            d = int(b["days"] or 0)
+            g["exp"] = int(time.time() + d * 86400) if d > 0 else 0
+        if "extend" in b:                                 # maujooda expiry me N din jodo
+            base = max(g.get("exp") or 0, time.time())
+            g["exp"] = int(base + int(b["extend"]) * 86400)
+        if "name" in b and str(b["name"]).strip():
+            g["name"] = str(b["name"]).strip()[:30]
+        if "password" in b:
+            pw = str(b["password"] or "").strip() or _new_pw()
+            if len(pw) < 6:
+                raise ValueError("password kam se kam 6 akshar ka ho")
+            if _pw_taken(pw, skip=gid):
+                raise ValueError("ye password pehle se kisi ka hai, doosra rakho")
+            _guest_setpw(g, pw)
+            out["password"] = pw
+        guests_save()
+    return out
+
+
+def guest_del(gid):
+    with GLOCK:
+        GUESTS.pop(gid, None)
+        guests_save()
+
+
+def check_login(pw):
+    """(role, gid, msg): role 'owner' / 'guest' / None. Galat par ginti badhti hai (check_password jaisa lock)."""
+    pw = str(pw)
+    with AUTH_LOCK:
+        left = auth_locked()
+        if left:
+            return None, None, "🔒 lock hai, %d ghante %d min baad koshish karo" % (left // 3600, left % 3600 // 60)
+        if hmac.compare_digest(pw.encode("utf-8", "replace"), PASSWORD.encode("utf-8", "replace")):
+            role, gid = "owner", None
+        else:
+            gid = guest_find(pw)
+            if gid and not guest_ok(GUESTS.get(gid)):
+                return None, None, "⛔ ye access band ya expire ho gaya, owner se pucho"
+            role = "guest" if gid else None
+        if role:
+            if AUTH["fails"]:
+                AUTH["fails"] = 0
+                auth_save()
+            return role, gid, ""
+        AUTH["fails"] += 1
+        if AUTH["fails"] >= MAX_TRIES:
+            AUTH["until"] = time.time() + LOCK_SECS
+            auth_save()
+            return None, None, "🔒 %d galat try ho gaye, 1 din ke liye lock" % MAX_TRIES
+        auth_save()
+        return None, None, "❌ galat password (%d/%d)" % (AUTH["fails"], MAX_TRIES)
+
+
+guests_load()
 
 SYSTEM = """Tum Mumbai ho, user ke phone par chalne wala coding aur sab-kaam ka sahayak (app, bot, website, script, PDF/docx/xlsx document, notes, research). Hinglish me chhota aur seedha bolo.
 Agar user sirf baat kare, salaam kare ya sawal puche, to seedha normal jawab do. Koi command mat chalao.
@@ -5880,6 +6059,107 @@ function unlockAll(){post('/unlock').then(function(){openConf()})}
 </script></body></html>"""
 
 
+GUEST_PAGE = r"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Mumbai Chat</title><style>
+:root{--bg:#faf9f5;--fg:#1f1e1d;--card:#efede6;--me:#c96442}
+@media(prefers-color-scheme:dark){:root{--bg:#262624;--fg:#eceae4;--card:#34332f}}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid #8883}
+header b{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+header small{opacity:.6}
+button{border:0;border-radius:10px;padding:8px 12px;font-size:14px;background:var(--card);color:var(--fg)}
+#log{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
+.m{max-width:88%;padding:10px 12px;border-radius:14px;white-space:pre-wrap;word-wrap:break-word;line-height:1.4;background:var(--card)}
+.u{align-self:flex-end;background:var(--me);color:#fff}
+.e{color:#c0392b}
+form{display:flex;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom,0px));border-top:1px solid #8883}
+textarea{flex:1;resize:none;max-height:140px;padding:10px;font:inherit;border-radius:12px;border:1px solid #8886;background:transparent;color:inherit}
+#s{background:var(--me);color:#fff;padding:0 18px;font-size:16px}
+</style></head><body>
+<header><b id=who>Mumbai Chat</b><small id=exp></small><button id=nw>Naya</button><button id=lo>Logout</button></header>
+<div id=log></div>
+<form id=f><textarea id=t rows=1 placeholder="Kuch bhi poochho..."></textarea><button id=s>Bhejo</button></form>
+<script>
+var log=document.getElementById('log'),t=document.getElementById('t'),hist=[],busy=false;
+function add(cls,txt){var d=document.createElement('div');d.className='m '+cls;d.textContent=txt;log.appendChild(d);log.scrollTop=log.scrollHeight;return d}
+fetch('/me').then(function(r){return r.json()}).then(function(j){
+ document.getElementById('who').textContent='Hi '+j.name;
+ if(j.exp)document.getElementById('exp').textContent='till '+new Date(j.exp*1000).toLocaleDateString()
+}).catch(function(){});
+document.getElementById('nw').onclick=function(){hist=[];log.textContent=''};
+document.getElementById('lo').onclick=function(){fetch('/logout',{method:'POST',body:'{}'}).then(function(){location.reload()})};
+function send(){
+ var q=t.value.trim();if(!q||busy)return;busy=true;t.value='';
+ add('u',q);hist.push({role:'user',content:q});
+ var w=add('','...');
+ fetch('/v1/chat/completions',{method:'POST',body:JSON.stringify({messages:hist.slice(-20)})}).then(function(r){
+  if(r.status==401){location.reload();return}
+  return r.json().then(function(j){
+   var a=j&&j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content;
+   if(a){w.textContent=a;hist.push({role:'assistant',content:a})}
+   else{w.className='m e';w.textContent=(j&&j.error&&j.error.message)||'jawab nahi aaya, dobara try karo';hist.pop()}
+  })
+ }).catch(function(){w.className='m e';w.textContent='server se baat nahi hui';hist.pop()}).then(function(){busy=false})
+}
+document.getElementById('f').onsubmit=function(e){e.preventDefault();send()};
+t.addEventListener('keydown',function(e){if(e.key=='Enter'&&!e.shiftKey&&!/Mobi|Android/i.test(navigator.userAgent)){e.preventDefault();send()}});
+</script></body></html>"""
+
+
+ADMIN_PAGE = r"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Guests</title><style>
+:root{--bg:#faf9f5;--fg:#1f1e1d;--card:#efede6;--acc:#c96442}
+@media(prefers-color-scheme:dark){:root{--bg:#262624;--fg:#eceae4;--card:#34332f}}
+*{box-sizing:border-box}body{margin:0;padding:14px;background:var(--bg);color:var(--fg);font:15px system-ui,sans-serif;max-width:560px;margin:auto}
+h2{margin:6px 0 12px}input{width:100%;padding:10px;margin:4px 0;font:inherit;border-radius:10px;border:1px solid #8886;background:transparent;color:inherit}
+button{border:0;border-radius:9px;padding:8px 11px;font-size:14px;background:var(--card);color:var(--fg);margin:3px 3px 0 0}
+.go{background:var(--acc);color:#fff;width:100%;padding:11px;font-size:16px}
+.c{background:var(--card);border-radius:14px;padding:12px;margin:10px 0}
+.k{font:600 20px ui-monospace,monospace;letter-spacing:1px;user-select:all}
+.on{color:#2e8b57}.off{color:#c0392b}small{opacity:.7}.d{color:#c0392b}
+</style></head><body>
+<h2>👨‍👩‍👧 Guest accounts</h2>
+<div class=c><b>Naya guest</b>
+<input id=n placeholder="Naam (jaise Mummy)" maxlength=30>
+<input id=p placeholder="Password (khali = apne aap banega)" autocomplete=off>
+<input id=d type=number min=0 placeholder="Kitne din chalega (khali = kabhi expire nahi)">
+<button class=go id=add>Add</button><div id=out></div></div>
+<div id=list></div>
+<script>
+function api(p,b){return fetch(p,{method:'POST',body:JSON.stringify(b||{})}).then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error((j.error&&j.error.message)||'error');return j})})}
+function el(tag,txt,cls){var e=document.createElement(tag);if(txt!=null)e.textContent=txt;if(cls)e.className=cls;return e}
+function fmt(t){return t?new Date(t*1000).toLocaleString():'-'}
+function box(msg,pw){var o=document.getElementById('out');o.textContent='';var c=el('div',null,'c');c.appendChild(el('div',msg));if(pw){c.appendChild(el('div',pw,'k'));c.appendChild(el('small','Ye sirf abhi dikhega, note kar lo'))}o.appendChild(c)}
+function act(p,b,msg){api(p,b).then(function(j){if(j.password)box(msg||'Naya password:',j.password);load()}).catch(function(e){alert(e.message)})}
+function load(){fetch('/guests').then(function(r){return r.json()}).then(function(j){
+ var L=document.getElementById('list');L.textContent='';
+ if(!j.guests.length)L.appendChild(el('small','Abhi koi guest nahi'));
+ j.guests.forEach(function(g){
+  var c=el('div',null,'c');
+  var st=g.off?'⛔ band':(g.exp&&g.exp*1000<Date.now()?'⌛ expire':'✅ chalu');
+  c.appendChild(el('b',g.name));c.appendChild(document.createTextNode(' '));c.appendChild(el('span',st,g.ok?'on':'off'));
+  c.appendChild(el('div','Expiry: '+(g.exp?fmt(g.exp):'kabhi nahi')+'  ·  Last: '+fmt(g.last)+'  ·  Msgs: '+g.n,'')).className='small';
+  var B=function(t,f,cls){var b=el('button',t,cls);b.onclick=f;c.appendChild(b)};
+  B(g.off?'Chalu karo':'Band karo',function(){act('/guest_set',{id:g.id,off:!g.off})});
+  B('+7 din',function(){act('/guest_set',{id:g.id,extend:7})});
+  B('+30 din',function(){act('/guest_set',{id:g.id,extend:30})});
+  B('Kabhi expire nahi',function(){act('/guest_set',{id:g.id,days:0})});
+  B('Naya password',function(){var p=prompt('Naya password (khali = apne aap)');if(p!==null)act('/guest_set',{id:g.id,password:p})});
+  B('Delete',function(){if(confirm(g.name+' hata dein?'))act('/guest_del',{id:g.id})},'d');
+  L.appendChild(c)})
+})}
+document.getElementById('add').onclick=function(){
+ var d=document.getElementById('d').value;
+ api('/guest_add',{name:document.getElementById('n').value,password:document.getElementById('p').value,days:d?parseInt(d,10):0}).then(function(j){
+  box(j.name+' ka password:',j.password);['n','p','d'].forEach(function(i){document.getElementById(i).value=''});load()
+ }).catch(function(e){alert(e.message)})}
+load();
+</script></body></html>"""
+
+
 class H(BaseHTTPRequestHandler):
     def _send(self, code, data, ctype="application/json", hdrs=None):
         if isinstance(data, str):
@@ -5888,7 +6168,8 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         for k, v in (hdrs or {}).items():
-            self.send_header(k, v)
+            for x in (v if isinstance(v, list) else [v]):
+                self.send_header(k, x)
         self.end_headers()
         self.wfile.write(data)
 
@@ -5914,12 +6195,25 @@ class H(BaseHTTPRequestHandler):
         return False
 
     def _authed(self):
-        """Login cookie, ya OpenCode jaise tool ke liye 'Authorization: Bearer <password>' (galat par ginti badhti hai)."""
+        """Login cookie, ya OpenCode jaise tool ke liye 'Authorization: Bearer <password>' (galat par ginti badhti hai).
+        self.role = 'owner' / 'guest' (guest sirf chat kar sakta hai)."""
+        self.role, self.gid = None, None
         if self._cookie_ok():
+            self.role = "owner"
             return True
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "mg":
+                gid = guest_from_token(v)
+                if gid:
+                    self.role, self.gid = "guest", gid
+                    return True
         h = self.headers.get("Authorization") or ""
         if h.startswith("Bearer "):
-            return check_password(h[7:].strip())[0]
+            role, gid, _ = check_login(h[7:].strip())
+            if role:
+                self.role, self.gid = role, gid
+                return True
         return False
 
     def do_HEAD(self):                      # uptime bot aksar HEAD bhejte hain
@@ -5937,11 +6231,23 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/health":             # bina password, uptime bot ke liye
             return self._send(200, "ok", "text/plain")
         if not self._authed():
-            if u.path in ("/events", "/files", "/projects", "/file", "/raw", "/download", "/zip", "/config") or u.path.rstrip("/").endswith("/models"):
+            if u.path in ("/events", "/files", "/projects", "/file", "/raw", "/download", "/zip", "/config", "/me", "/admin", "/guests") or u.path.rstrip("/").endswith("/models"):
                 return self._send(401, '{"error":{"message":"login chahiye"}}')
             return self._send(200, LOGIN, "text/html; charset=utf-8")
+        if self.role == "guest" and not u.path.rstrip("/").endswith("/models"):
+            if u.path == "/me":
+                g = GUESTS.get(self.gid) or {}
+                return self._send(200, json.dumps({"name": g.get("name", ""), "exp": g.get("exp", 0)}))
+            if u.path in ("/events", "/files", "/projects", "/file", "/raw", "/download", "/zip", "/config",
+                          "/admin", "/guests"):
+                return self._send(403, '{"error":{"message":"guest ko ye allowed nahi"}}')
+            return self._send(200, GUEST_PAGE, "text/html; charset=utf-8")
         if u.path.rstrip("/").endswith("/models"):
             self._send(200, json.dumps({"object": "list", "data": [{"id": "mumbai", "object": "model"}]}))
+        elif u.path == "/admin":
+            self._send(200, ADMIN_PAGE, "text/html; charset=utf-8")
+        elif u.path == "/guests":
+            self._send(200, json.dumps({"guests": guest_list()}))
         elif u.path == "/events":
             try:
                 after = int((q.get("after") or ["0"])[0] or 0)
@@ -6018,14 +6324,24 @@ class H(BaseHTTPRequestHandler):
                 lb = json.loads(self.rfile.read(min(n, 2048)) or b"{}")
             except ValueError:
                 lb = {}
-            ok, msg = check_password(lb.get("password", "") if isinstance(lb, dict) else "")
-            if not ok:
+            role, gid, msg = check_login(lb.get("password", "") if isinstance(lb, dict) else "")
+            if not role:
                 return self._send(403, json.dumps({"error": {"message": msg}}))
             secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
-            return self._send(200, '{"ok":true}', hdrs={
-                "Set-Cookie": "mb=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000%s" % (AUTH_TOKEN, secure)})
+            ck = "%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s"
+            if role == "owner":
+                cookies = [ck % ("mb", AUTH_TOKEN, 2592000, secure), ck % ("mg", "", 0, secure)]
+            else:
+                guest_touch(gid)
+                cookies = [ck % ("mg", guest_token(gid), 2592000, secure), ck % ("mb", "", 0, secure)]
+            return self._send(200, '{"ok":true}', hdrs={"Set-Cookie": cookies})
+        if u.path == "/logout":
+            ck = "%s=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+            return self._send(200, '{"ok":true}', hdrs={"Set-Cookie": [ck % "mb", ck % "mg"]})
         if not self._authed():
             return self._send(401, '{"error":{"message":"login chahiye"}}')
+        if self.role == "guest" and not u.path.endswith("/chat/completions"):
+            return self._send(403, '{"error":{"message":"guest ko ye allowed nahi"}}')
         if u.path == "/upload":
             if n > MAX_UPLOAD:
                 return self._send(413, '{"error":{"message":"file bahut badi (25MB se zyada)"}}')
@@ -6047,7 +6363,25 @@ class H(BaseHTTPRequestHandler):
             body = {}
         p = u.path
         if p.endswith("/chat/completions"):
+            if self.role == "guest":
+                body = self._guest_body(body)
+                if not body["messages"]:
+                    return self._send(400, '{"error":{"message":"khali message"}}')
+                guest_touch(self.gid)
             return self.proxy(body)
+        if p == "/guest_add":
+            try:
+                return self._send(200, json.dumps(guest_add(body.get("name"), body.get("password"), int(body.get("days") or 0))))
+            except (ValueError, TypeError) as e:
+                return self._send(400, json.dumps({"error": {"message": str(e)}}))
+        if p == "/guest_set":
+            try:
+                return self._send(200, json.dumps(guest_set(str(body.get("id", "")), body)))
+            except (ValueError, TypeError) as e:
+                return self._send(400, json.dumps({"error": {"message": str(e)}}))
+        if p == "/guest_del":
+            guest_del(str(body.get("id", "")))
+            return self._send(200, "{}")
         if p == "/stop":
             STATE["cancel"] = True
             STATE["pending"].clear()          # beech me queue kiye message bhi nahi chalenge
@@ -6149,6 +6483,26 @@ class H(BaseHTTPRequestHandler):
             else:
                 ev("note", text="⏳ abhi kaam chal raha hai")
         self._send(200, "ok", "text/plain")
+
+    @staticmethod
+    def _guest_body(body):
+        """Guest ki request saaf karo: sirf user/assistant text, tools/model/extra field nahi, size limit."""
+        msgs, total = [], 0
+        for m in reversed((body.get("messages") or [])[-30:]):
+            if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
+                continue
+            c = m.get("content")
+            if isinstance(c, list):
+                c = " ".join(str(x.get("text", "")) for x in c if isinstance(x, dict))
+            if not isinstance(c, str) or not c.strip():
+                continue
+            c = c[:8000]
+            if total + len(c) > G_MAX_CHARS and msgs:
+                break
+            total += len(c)
+            msgs.append({"role": m["role"], "content": c})
+        msgs.reverse()
+        return {"messages": msgs, "stream": bool(body.get("stream"))}
 
     # ---------- OpenCode ke liye proxy (optional) ----------
     def proxy(self, body):
@@ -8970,12 +9324,12 @@ def run_agent(task):
 VERSION = "5.6"
 ASK_WAIT = float(_env("ASK_WAIT", "600"))                           # user ke jawab ka intezaar 10 min (phir 3 AI faisla karte hain)
 ASK_FIRST = _env("ASK_FIRST", "1") != "0"                           # 0 = naye kaam par shuru ke sawal band
-CHAT_PREF = ("GROQ", "DS", "DAI", "UAI", "NV2")                            # sirf baat: JAAT KABHI NAHI
-STUDY_PREF = ("GROQ", "DS", "DAI", "UAI", "NV2")                           # padhai / GK sawal: Gemini NAHI (uski limit bachao): Groq, DS, DeepAI, NV2
-TRIAGE_PREF = ("GEM2", "GEM", "GEM3", "GROQ", "DS", "NV2")          # dikkat/photo dekhne wala: Gemini fast (GEM2 think=0 pehle)
-QA_PREF = ("GROQ", "NV2", "GEM", "GEM2", "GEM3")                   # project ke sawal: pehle Groq/NV2, Gemini sirf backup
-EXPLAIN_PREF = ("GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2")         # setup samjhana / project ke sawal: JAAT nahi
-EXAM_PREF = ("GEM", "GROQ", "GEM2", "GEM3", "DS")                   # task samajhne wale: JAAT nahi
+CHAT_PREF = ("HAIKU", "GROQ", "DS", "DAI", "UAI", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")                            # sirf baat: JAAT KABHI NAHI
+STUDY_PREF = ("HAIKU", "GROQ", "DS", "DAI", "UAI", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")                           # padhai / GK sawal: Gemini NAHI (uski limit bachao): Groq, DS, DeepAI, NV2
+TRIAGE_PREF = ("GEM2", "GEM", "GEM3", "GROQ", "DS", "NV2", "HAIKU", "DSF41", "MIMO26", "DSF4", "MIMO25")          # dikkat/photo dekhne wala: Gemini fast (GEM2 think=0 pehle)
+QA_PREF = ("GROQ", "NV2", "GEM", "GEM2", "GEM3", "HAIKU", "DSF41", "MIMO26", "DSF4", "MIMO25")                   # project ke sawal: pehle Groq/NV2, Gemini sirf backup
+EXPLAIN_PREF = ("GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2", "HAIKU", "DSF41", "MIMO26", "DSF4", "MIMO25")         # setup samjhana / project ke sawal: JAAT nahi
+EXAM_PREF = ("GEM", "GROQ", "GEM2", "GEM3", "DS", "HAIKU", "DSF41", "MIMO26", "DSF4", "MIMO25")                   # task samajhne wale: JAAT nahi
 
 
 def ask_user(question, options=None, ctx=""):
@@ -9122,7 +9476,7 @@ def pre_route(task):
         ev("note", text=("📚 sawal: Groq/DS/DeepAI se (Gemini nahi)" if r == "study" else "💬 sirf baat: Groq/DS/DeepAI se") + " - JAAT nahi", _log=False)
         if chat_reply(task, study=(r == "study")):
             return True
-        ev("err", text="⚠ Groq/DS/Gemini/DeepAI se abhi jawab nahi aaya (limit ya cooldown). Thodi der baad dobara bhejo. (JAAT sirf code likhta hai, baat nahi karta)")
+        ev("err", text="⚠ Koi chalu AI (HAIKU/Groq/DS/DeepAI...) abhi jawab nahi de paya (limit ya cooldown). ⚙ me dekho koi AI ON hai ya nahi. Thodi der baad dobara bhejo. (JAAT sirf code likhta hai, baat nahi karta)")
         add("user", task)
         return True
     return False
