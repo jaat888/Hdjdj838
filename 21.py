@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mumbai 5.4 (24.py) - blitz.cloud (Docker) par chalne wala coding agent. Sirf Python stdlib.
+"""Mumbai 5.8 (21.py) - blitz.cloud (Docker) par chalne wala coding agent. Sirf Python stdlib.
 
 Environment variables (blitz me daalo):
   JAAT_KEY  GEM_KEY  DS_KEY  GROQ_KEY  NV2_KEY  DAI_KEY     AI ki keys (jo key nahi di wo AI band rahega)
@@ -7,12 +7,13 @@ Environment variables (blitz me daalo):
   NTFY_TOPIC        (optional) ntfy app ka topic, ya TG_TOKEN + TG_CHAT (Telegram): kaam khatam hone par phone par message
   BRAVE_KEY         (optional) @@SEARCH ke liye Brave Search; na do to DuckDuckGo se chalta hai
   MUMBAI_PASSWORD   (optional) login password, na do to 8888
-  /admin            (sirf owner) ghar walon ke liye guest password banao: expiry, band/chalu, naya password. Guest sirf chat kar sakta hai.
+  /admin            (sirf owner) guest access: chat-only ya full shared workspace; expiry, band/chalu, password badlo, delete.
   PORT              blitz khud deta hai (na ho to 8011)
   DATA_DIR          (optional) projects ka folder, default ~/mumbai_work
   ALLOWED_HOSTS     (optional) sirf ye domain maane, comma se alag
   MCP_GATEWAY_URL   (optional) mcp-gateway ka link (jaise https://mcp-gateway.xxx.blitz.cloud) => @@MCP tools chalu
   MCP_API_KEY       (optional) gateway par API_KEY lagi ho to wahi key
+  HAIKU_CTX         (optional) Haiku ke liye prompt/file context budget (characters), default 100000
 
 Login: 50 galat try par 1 din ke liye lock. /health bina password ke 'ok' deta hai (uptime bot ke liye).
 Termux par bhi chalta hai:  python 21.py  ->  http://127.0.0.1:8011"""
@@ -180,6 +181,7 @@ for _n, _m, _grp, _tier, _gap in (
         "rate_cool": 60,
         "retry_429": 1,
         "max_tokens": 16000,       # server mana kare to ask_oai asli hadd seekh leta hai (LEARN_MT)
+        **({"max_ctx": int(_env("HAIKU_CTX", "100000"))} if _n == "HAIKU" else {}),
     }
 
 # ---- bada jawab (token) + image dekhna: JAAT aur Gemini (conf se badal sakte ho) ----
@@ -193,7 +195,7 @@ VISION_PREF = ("GEM", "GEM2", "GEM3", "JAAT", "NV2")                            
 DEFAULT_APIS = copy.deepcopy(APIS)
 DEFAULT_PRIORITY = list(PRIORITY)
 
-VERSION = "5.1"
+VERSION = "5.7"
 PORT = int(os.environ.get("PORT") or 8011)
 BIND = os.environ.get("BIND") or "0.0.0.0"
 MAX_STEPS = 1000          # ek kaam me itne kadam
@@ -276,7 +278,7 @@ def check_password(pw):
 
 auth_load()
 
-# ---------- guest accounts: ghar walon ke liye alag password (sirf chat, keys/config/shell tak koi pahunch nahi) ----------
+# ---------- guest accounts: owner-controlled chat-only or shared-workspace access; keys/provider config always owner-only ----------
 GUEST_FILE = os.path.join(ROOT, ".mumbai", "guests.json")
 GUESTS = {}                      # gid -> {name, salt, h, tv, exp(0=kabhi nahi), off, made, last, n}
 GLOCK = threading.Lock()
@@ -353,9 +355,17 @@ def guest_touch(gid):
             guests_save()
 
 
+def guest_mode(gid):
+    """Guest ko owner ne kaunsi permission di: chat ya workspace."""
+    with GLOCK:
+        g = GUESTS.get(gid) or {}
+        return "workspace" if g.get("mode") == "workspace" else "chat"
+
+
 def guest_list():
     with GLOCK:
-        return [{"id": i, "name": g["name"], "exp": g.get("exp", 0), "off": bool(g.get("off")), "ok": guest_ok(g),
+        return [{"id": i, "name": g["name"], "mode": "workspace" if g.get("mode") == "workspace" else "chat",
+                 "exp": g.get("exp", 0), "off": bool(g.get("off")), "ok": guest_ok(g),
                  "last": g.get("last", 0), "n": g.get("n", 0), "made": g.get("made", 0)}
                 for i, g in sorted(GUESTS.items(), key=lambda x: x[1].get("made", 0))]
 
@@ -371,23 +381,25 @@ def _new_pw():
     return "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(8))
 
 
-def guest_add(name, pw, days):
+def guest_add(name, pw, days, mode="chat"):
     name = str(name or "").strip()[:30]
     if not name:
         raise ValueError("naam likho")
     pw = str(pw or "").strip() or _new_pw()
     if len(pw) < 6:
         raise ValueError("password kam se kam 6 akshar ka ho")
+    mode = "workspace" if mode == "workspace" else "chat"
     with GLOCK:
         if _pw_taken(pw):
             raise ValueError("ye password pehle se kisi ka hai, doosra rakho")
         gid = os.urandom(4).hex()
-        g = {"name": name, "exp": int(time.time() + days * 86400) if days and days > 0 else 0,
+        g = {"name": name, "mode": mode,
+             "exp": int(time.time() + days * 86400) if days and days > 0 else 0,
              "off": False, "made": int(time.time()), "last": 0, "n": 0}
         _guest_setpw(g, pw)
         GUESTS[gid] = g
         guests_save()
-    return {"id": gid, "name": name, "password": pw}
+    return {"id": gid, "name": name, "mode": mode, "password": pw}
 
 
 def guest_set(gid, b):
@@ -406,6 +418,8 @@ def guest_set(gid, b):
             g["exp"] = int(base + int(b["extend"]) * 86400)
         if "name" in b and str(b["name"]).strip():
             g["name"] = str(b["name"]).strip()[:30]
+        if "mode" in b:
+            g["mode"] = "workspace" if b.get("mode") == "workspace" else "chat"
         if "password" in b:
             pw = str(b["password"] or "").strip() or _new_pw()
             if len(pw) < 6:
@@ -484,6 +498,11 @@ purani lines bilkul waise hi jaise file me hain
 =======
 nayi lines
 >>>>>>> REPLACE
+HAR MODEL KE LIYE FILE ACCESS (JAAT, Haiku/Claude, Gemini, DeepSeek, Groq, NVIDIA, MIMO, DeepAI, UAI aur DSX sab):
+- Tumhe project files padhne ke liye @@TREE, @@LS, @@GREP, @@READ, @@UNZIP aur file-preview commands available hain. Kisi ek model tak file reading simit nahi hai.
+- Project ke baare me jawab dene ya code badalne se pehle zaroori files khud @@TREE/@@READ se padho; file list/card ko asli code mat samjho.
+- Badi file ho to relevant line ranges me @@READ karo; output kata ho to agli range padho. Purani file edit karne se pehle @@READ zaroor karo.
+- Agar command ka output nahi mila ya file nahi padh paaye, saaf batao; padhne ka natak ya andaza mat lagao.
 KAISE SOCHO (niyam kam, samajh zyada):
 1. Pehle samjho. AUTO JAANKARI me SAMAJH hoti hai: user ka asli maqsad, kaam ka type aur DONE CRITERIA (kaam kab poora maana jayega). Wahi nishana hai: usse bahar ka kaam mat badhao, usme se kuch chhodo mat.
 2. Banao, phir chala ya padh ke dekho. Bina saboot 'ho gaya' mat bolo. @@DONE hamesha AKELA likho (WRITE/RUN ke saath nahi); saar me har D-criteria ka saboot likho (kaunse @@RUN/@@READ ke natije se). Mumbai ek alag reviewer se ye saboot asli natije se milata hai.
@@ -503,6 +522,7 @@ SYSTEM_MINI = """Tum Mumbai ho, coding assistant. Hinglish me chhota bolo. Sirf 
 @@WRITE <file>  (content, aakhir me @@END alag line par)
 @@EDIT <file>  (<<<<<<< SEARCH / ======= / >>>>>>> REPLACE, aakhir me @@END)
 @@READ <file> <a-b>  (badi file ho to line range, jaise @@READ f.kt 1-400; ek baar me ~1000 line tak milti hain)   @@LS <dir>   @@TREE   @@GREP <text>   @@RUN <cmd>   @@VERIFY (project jaanch)   @@NOTE <ek line>   @@LEARN <sabak>   @@ASK <sawal>   @@LOOK <file.pdf ya image> [sawal]   @@CHECK <n>   @@DONE <saar>
+HAR MODEL KO FILE ACCESS HAI: @@TREE, @@LS, @@GREP, @@READ, @@UNZIP aur @@LOOK sab models ke liye hain, sirf JAAT ke liye nahi. Project/file sawal par zaroori file khud padho; badi file line ranges me padho; edit se pehle @@READ karo. File padh na pao to saaf batao, guess mat karo.
 Neeche PLAN dikhe to ek-ek kadam karo, har kadam ke baad @@CHECK n. Saare kadam ✅ hone par hi @@DONE.
 @@DONE akela likho, @@VERIFY/RUN ka natija dekh ke. Test/build kadam @@VERIFY saaf aane par hi @@CHECK. Chhoti chhoti files likho. Ek reply me sirf EK command do aur uska natija dekh ke hi agla do. Jo file ka hissa padh chuke ho use dobara mat padho; natija kata ho to agli line range padho."""
 
@@ -5850,7 +5870,7 @@ footer textarea{min-height:54px;max-height:200px;padding:15px 18px;line-height:1
 <header><b id=ttl onclick="openProjects()" title="Project / chat badlo">🌇 Mumbai <i>▾</i></b><span class=sp></span>
 <button class=ib id=fbtn type=button onclick="openFiles()" aria-label=Files><svg width=22 height=22 viewBox="0 0 24 24" fill=none stroke=currentColor stroke-width=1.8 stroke-linecap=round stroke-linejoin=round><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
 <button class=ib id=mnb type=button onclick="toggleMenu(event)" aria-label=Menu>&#8943;</button>
-<div id=menu><button type=button onclick="mnu('/test')">Test</button><button type=button onclick="mnu('conf')">AI settings</button><button type=button onclick="mnu('/undo')">Undo</button><button type=button onclick="mnu('/new')">New chat</button></div></header>
+<div id=menu><button type=button onclick="mnu('files')">📁 Files</button><button id=confbtn type=button onclick="mnu('conf')">⚙ AI settings</button><button id=sharebtn type=button onclick="location.href='/admin'">👥 Share access / guests</button><button type=button onclick="mnu('/test')">Test</button><button type=button onclick="mnu('/undo')">Undo</button><button type=button onclick="mnu('/new')">New chat</button></div></header>
 <div id=chat><div id=hint>Kaam likho, jaise "ek todo app banao html me".<br>Main files bana ke dunga. 📁 me dekh aur download kar sakte ho. Upar project ka naam (▾) dabao to dusra project / chat khul jayega.</div></div>
 <div id=bar><span class=st>✻</span><span class=tx id=bt>Soch raha hoon…</span></div>
 <footer>
@@ -5879,6 +5899,7 @@ footer textarea{min-height:54px;max-height:200px;padding:15px 18px;line-height:1
 <script>
 var lastKind='',last=0,running=false,sending=false,polling=false,redo=false,boot='',chat=document.getElementById('chat'),sheet=document.getElementById('sheet'),psheet=document.getElementById('psheet');
 function el(tag,cls,txt){var e=document.createElement(tag);if(cls)e.className=cls;if(txt!=null)e.textContent=txt;return e}
+fetch('/me').then(function(r){return r.json()}).then(function(j){if(j.role==='guest'){var a=document.getElementById('sharebtn'),b=document.getElementById('confbtn');if(a)a.style.display='none';if(b)b.style.display='none';document.getElementById('ttl').title='Shared workspace · guest access'}}).catch(function(){});
 var ICON={LS:'📂',READ:'📖',WRITE:'📝',WRITEB64:'🖼',EDIT:'✏️',TREE:'🌳',GREP:'🔎',RUN:'⚙️',BG:'🚀',LOG:'📜',KILL:'🛑',ZIP:'📦',UNZIP:'📂',WEB:'🌐',SEARCH:'🔍',NOTIFY:'🔔',MCP:'🧰',NOTE:'🗒',VERIFY:'🛡',LOOK:'👁',LEARN:'🧠',ASK:'❓'},plan=[];
 function toast(t){chat.appendChild(el('div','msg err',t));chat.scrollTop=chat.scrollHeight}
 var chk=null,chkN=[0,0],planBox=null;
@@ -6006,8 +6027,8 @@ function upload(fs){var inp=document.getElementById('up'),list=Array.prototype.s
  next()}
 var FILES=[],AGE={};
 function ago(s){if(s<90)return 'abhi';if(s<3600)return Math.floor(s/60)+' min';if(s<86400)return Math.floor(s/3600)+' ghante';return Math.floor(s/86400)+' din'}
-function openFiles(){sheet.style.display='flex';
- fetch('/files').then(r=>r.json()).then(function(j){FILES=j.files;AGE=j.age||{};drawFiles();document.getElementById('fl').scrollTop=0})}
+function openFiles(){sheet.style.display='flex';var fl=document.getElementById('fl');fl.textContent='Files load ho rahi hain…';
+ fetch('/files').then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(function(j){if(!j||!Array.isArray(j.files))throw new Error('server ka jawab galat hai');FILES=j.files;AGE=j.age||{};drawFiles();fl.scrollTop=0}).catch(function(e){fl.textContent='Files load nahi hui: '+e.message+' — dobara 📁 dabao.'})}
 var OPENF={},FCOL={py:'#3776ab',js:'#ca8a04',ts:'#2563eb',html:'#e34f26',css:'#0ea5e9',json:'#64748b',md:'#475569',txt:'#64748b',pdf:'#dc2626',png:'#16a34a',jpg:'#16a34a',kt:'#7c3aed',java:'#ea580c',xml:'#0d9488',yml:'#0d9488',yaml:'#0d9488',sh:'#334155',zip:'#92400e'};
 function fileRow(n,d,showDir){var ext=(n.split('.').pop()||'').toLowerCase(),base=n.split('/').pop(),dir=n.indexOf('/')>=0?n.slice(0,n.lastIndexOf('/')):'';
  var w=el('div');var r=el('div','frow');var ic=el('div','fic',(n.indexOf('.')>=0?ext:'file').slice(0,4).toUpperCase());ic.style.background=FCOL[ext]||'#64748b';r.appendChild(ic);
@@ -6126,7 +6147,9 @@ button{border:0;border-radius:9px;padding:8px 11px;font-size:14px;background:var
 <input id=n placeholder="Naam (jaise Mummy)" maxlength=30>
 <input id=p placeholder="Password (khali = apne aap banega)" autocomplete=off>
 <input id=d type=number min=0 placeholder="Kitne din chalega (khali = kabhi expire nahi)">
-<button class=go id=add>Add</button><div id=out></div></div>
+<label for=mode>Access permission</label><select id=mode style="width:100%;padding:10px;margin:4px 0 8px;font:inherit;border-radius:10px;border:1px solid #8886;background:transparent;color:inherit"><option value=chat>💬 Chat only (safe default)</option><option value=workspace>🛠 Full app: coding + shared files</option></select>
+<button class=go id=add>Add guest</button><div id=out></div></div>
+<div class=c><b>⚠ Full app access</b><p style="margin:6px 0 0">Full app wale guest aapke isi shared workspace ke projects/files dekh, badal ya delete kar sakte hain aur chal raha kaam rok sakte hain. Sirf bharosemand bande ko do. Aap access band, password badal, expiry laga ya account delete kar sakte ho; pehle se kiye badlav wapas nahi honge.</p><small>Invite karne wale ko isi app ka URL aur guest password dena hai.</small></div>
 <div id=list></div>
 <script>
 function api(p,b){return fetch(p,{method:'POST',body:JSON.stringify(b||{})}).then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error((j.error&&j.error.message)||'error');return j})})}
@@ -6141,8 +6164,9 @@ function load(){fetch('/guests').then(function(r){return r.json()}).then(functio
   var c=el('div',null,'c');
   var st=g.off?'⛔ band':(g.exp&&g.exp*1000<Date.now()?'⌛ expire':'✅ chalu');
   c.appendChild(el('b',g.name));c.appendChild(document.createTextNode(' '));c.appendChild(el('span',st,g.ok?'on':'off'));
-  c.appendChild(el('div','Expiry: '+(g.exp?fmt(g.exp):'kabhi nahi')+'  ·  Last: '+fmt(g.last)+'  ·  Msgs: '+g.n,'')).className='small';
+  c.appendChild(el('div',(g.mode==='workspace'?'🛠 Full app · shared files':'💬 Chat only')+' · Expiry: '+(g.exp?fmt(g.exp):'kabhi nahi')+'  · Last: '+fmt(g.last)+'  · Msgs: '+g.n,'')).className='small';
   var B=function(t,f,cls){var b=el('button',t,cls);b.onclick=f;c.appendChild(b)};
+  B(g.mode==='workspace'?'Chat only karo':'Full app do',function(){var m=g.mode==='workspace'?'chat':'workspace';if(m==='workspace'&&!confirm('Is guest ko shared project/files read-write, delete aur coding access milega. Sirf bharosemand bande ko do. Jaari rakhein?'))return;act('/guest_set',{id:g.id,mode:m})});
   B(g.off?'Chalu karo':'Band karo',function(){act('/guest_set',{id:g.id,off:!g.off})});
   B('+7 din',function(){act('/guest_set',{id:g.id,extend:7})});
   B('+30 din',function(){act('/guest_set',{id:g.id,extend:30})});
@@ -6153,8 +6177,10 @@ function load(){fetch('/guests').then(function(r){return r.json()}).then(functio
 })}
 document.getElementById('add').onclick=function(){
  var d=document.getElementById('d').value;
- api('/guest_add',{name:document.getElementById('n').value,password:document.getElementById('p').value,days:d?parseInt(d,10):0}).then(function(j){
-  box(j.name+' ka password:',j.password);['n','p','d'].forEach(function(i){document.getElementById(i).value=''});load()
+ var mode=document.getElementById('mode').value;
+ if(mode==='workspace'&&!confirm('Full app guest aapke isi shared workspace ki files/projects read, badal ya delete kar sakta hai. Sirf bharosemand bande ko dein. Jaari rakhein?'))return;
+ api('/guest_add',{name:document.getElementById('n').value,password:document.getElementById('p').value,days:d?parseInt(d,10):0,mode:mode}).then(function(j){
+  box(j.name+' ka password:',j.password);['n','p','d'].forEach(function(i){document.getElementById(i).value=''});document.getElementById('mode').value='chat';load()
  }).catch(function(e){alert(e.message)})}
 load();
 </script></body></html>"""
@@ -6196,7 +6222,7 @@ class H(BaseHTTPRequestHandler):
 
     def _authed(self):
         """Login cookie, ya OpenCode jaise tool ke liye 'Authorization: Bearer <password>' (galat par ginti badhti hai).
-        self.role = 'owner' / 'guest' (guest sirf chat kar sakta hai)."""
+        self.role = 'owner' / 'guest'; guest permissions are checked per request."""
         self.role, self.gid = None, None
         if self._cookie_ok():
             self.role = "owner"
@@ -6235,15 +6261,24 @@ class H(BaseHTTPRequestHandler):
                 return self._send(401, '{"error":{"message":"login chahiye"}}')
             return self._send(200, LOGIN, "text/html; charset=utf-8")
         if self.role == "guest" and not u.path.rstrip("/").endswith("/models"):
+            g = GUESTS.get(self.gid) or {}
+            mode = guest_mode(self.gid)
             if u.path == "/me":
-                g = GUESTS.get(self.gid) or {}
-                return self._send(200, json.dumps({"name": g.get("name", ""), "exp": g.get("exp", 0)}))
-            if u.path in ("/events", "/files", "/projects", "/file", "/raw", "/download", "/zip", "/config",
-                          "/admin", "/guests"):
-                return self._send(403, '{"error":{"message":"guest ko ye allowed nahi"}}')
-            return self._send(200, GUEST_PAGE, "text/html; charset=utf-8")
+                return self._send(200, json.dumps({"name": g.get("name", ""), "exp": g.get("exp", 0),
+                                                   "role": "guest", "mode": mode}))
+            if mode == "workspace":
+                if u.path in ("/config", "/admin", "/guests"):
+                    return self._send(403, '{"error":{"message":"owner-only settings"}}')
+                # Full-app guest ko PAGE aur shared project endpoints milte hain; owner settings nahi.
+            else:
+                if u.path in ("/events", "/files", "/projects", "/file", "/raw", "/download", "/zip", "/config",
+                              "/admin", "/guests"):
+                    return self._send(403, '{"error":{"message":"guest ko ye allowed nahi"}}')
+                return self._send(200, GUEST_PAGE, "text/html; charset=utf-8")
         if u.path.rstrip("/").endswith("/models"):
             self._send(200, json.dumps({"object": "list", "data": [{"id": "mumbai", "object": "model"}]}))
+        elif u.path == "/me":
+            self._send(200, json.dumps({"role": "owner", "name": "Owner", "mode": "owner"}))
         elif u.path == "/admin":
             self._send(200, ADMIN_PAGE, "text/html; charset=utf-8")
         elif u.path == "/guests":
@@ -6340,8 +6375,14 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, '{"ok":true}', hdrs={"Set-Cookie": [ck % "mb", ck % "mg"]})
         if not self._authed():
             return self._send(401, '{"error":{"message":"login chahiye"}}')
-        if self.role == "guest" and not u.path.endswith("/chat/completions"):
-            return self._send(403, '{"error":{"message":"guest ko ye allowed nahi"}}')
+        if self.role == "guest":
+            if u.path.endswith("/chat/completions"):
+                pass  # normal chat/API calls are sanitized below
+            else:
+                guest_workspace_posts = {"/upload", "/stop", "/undo", "/new", "/project", "/delete", "/rename",
+                                         "/delete_project", "/rename_project", "/run", "/test"}
+                if guest_mode(self.gid) != "workspace" or u.path not in guest_workspace_posts:
+                    return self._send(403, '{"error":{"message":"ye action owner-only hai ya guest ko access nahi"}}')
         if u.path == "/upload":
             if n > MAX_UPLOAD:
                 return self._send(413, '{"error":{"message":"file bahut badi (25MB se zyada)"}}')
@@ -6371,7 +6412,7 @@ class H(BaseHTTPRequestHandler):
             return self.proxy(body)
         if p == "/guest_add":
             try:
-                return self._send(200, json.dumps(guest_add(body.get("name"), body.get("password"), int(body.get("days") or 0))))
+                return self._send(200, json.dumps(guest_add(body.get("name"), body.get("password"), int(body.get("days") or 0), body.get("mode", "chat"))))
             except (ValueError, TypeError) as e:
                 return self._send(400, json.dumps({"error": {"message": str(e)}}))
         if p == "/guest_set":
@@ -6508,11 +6549,41 @@ class H(BaseHTTPRequestHandler):
     def proxy(self, body):
         stream, tools = bool(body.get("stream")), bool(body.get("tools"))
         try:
-            for name in order():
+            # OpenAI-compatible/guest requests pehle yahan aate hain. Pehle ye har 'hello'
+            # ko PRIORITY ke kaaran JAAT par bhej deta tha; JAAT ab sirf coding/file kaam ka writer hai.
+            messages = body.get("messages") or []
+            last_user = ""
+            for message in reversed(messages if isinstance(messages, list) else []):
+                if isinstance(message, dict) and message.get("role") == "user":
+                    content = message.get("content", "")
+                    if isinstance(content, list):
+                        content = " ".join(str(x.get("text", "")) for x in content if isinstance(x, dict))
+                    last_user = str(content or "")
+                    break
+            # Coding intent = action applied to code/software/files, not a question that merely says "app" or "API".
+            code_request = bool(
+                re.search(r"```|@@|\.(?:py|js|ts|kt|java|html|css|json|md|txt|pdf|docx|xlsx|zip)\b|\b(?:bug|debug|traceback|exception|crash)\b", last_user, re.I)
+                or build_intent(last_user)
+                or re.search(
+                    r"\b(?:write|create|build|make|generate|implement|code|fix|edit|modify|refactor|deploy|install|run|execute|read|open|delete|rename|upload|download|test|add|change|update|remove|banao|bnao|banado|bana|likho|jodo|hatao)\b(?:\s+\w+){0,8}\s+\b(?:file|files|folder|project|repo|code|script|website|webapp|app|api|function|class|component|server|bot|browser|manager|module|package|manifest|config|test|apk|program)\b|"
+                    r"\b(?:file|files|folder|project|repo|code|script|website|webapp|app|api|function|class|component|server|bot|browser|manager|module|package|manifest|config|test|apk|program)\b(?:\s+\w+){0,8}\s+\b(?:write|create|build|make|generate|implement|code|fix|edit|modify|refactor|deploy|install|run|execute|read|open|delete|rename|upload|download|test|add|change|update|remove)\b",
+                    last_user, re.I))
+            live = order()
+            if code_request:
+                preferred = list(WRITE_PREF)
+                excluded = {"DSX"}  # DSX plans/audits; JAAT/Haiku/Gemini do the code writing.
+            else:
+                # Questions and greetings use chat/study models; JAAT never answers ordinary chat.
+                study_request = bool(re.search(r"\?|\b(?:what|why|how|when|where|who|which|explain|meaning|matlab|kya|kaise|kyu|kab|kahan|kaun|samjha|batao|btao)\b", last_user, re.I))
+                preferred = list(STUDY_PREF if study_request else CHAT_PREF)
+                excluded = {"JAAT", "DSX"}
+            names = [n for n in preferred if n in live and n not in excluded]
+            names += [n for n in live if n not in excluded and n not in names]
+            for name in names:
                 if self.try_provider(name, body, stream, tools):
                     return
             log("❌ koi AI nahi chala")
-            self._send(502, json.dumps({"error": {"message": "Mumbai: koi AI jawab nahi de paya"}}))
+            self._send(502, json.dumps({"error": {"message": "Mumbai: koi AI jawab nahi de paya. AI settings me providers check karo."}}))
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -6648,9 +6719,9 @@ def setup():
 CODE_FLOW = _env("CODE_FLOW", "1") != "0"        # 0 = purana flow
 SCAN_ON_CHECK = True                             # code/android me review har @@EDIT par nahi, file poori hone par (@@CHECK / @@DONE)
 EXAM_PREF = ("JAAT", "GEM", "GROQ", "GEM2", "GEM3", "DS")   # task dekhne wale (pehle 2 jo jawab dein)
-PLANNER_PREF = ("DSX", "HAIKU", "JAAT", "GROQ", "DS", "NV2", "DAI", "UAI")   # plan banane wale 3
-MERGER_PREF = ("DSX", "HAIKU", "GEM", "GEM2", "GEM3", "JAAT")       # plan jodne wala: Gemini
-SCAN_PREF = ("JAAT", "GROQ")                        # poori file wale scanner (2): JAAT, Groq. DS alag (bade prompt par tukdon me). NV2/DAI sirf tab jab DS bhi na ho
+PLANNER_PREF = ("DSX", "HAIKU", "GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2", "DAI", "UAI")  # architect/planners, no JAAT
+MERGER_PREF = ("DSX", "HAIKU", "GEM", "GEM2", "GEM3")       # independent plan merge, no JAAT
+SCAN_PREF = ("GROQ", "DS", "NV2", "HAIKU")                # independent file scanner; writer is not first reviewer
 SCAN_BACKUP = ("NV2", "DAI", "UAI")
 DS_PARTS_MAX = 6                                      # DS badi file ke itne tukde tak scan karta hai
 GEM_BIG_CHARS = 4000                                # Gemini sirf badi file par (ya aakhri @@DONE scan me)
@@ -6660,8 +6731,8 @@ GEM_SCAN_MAX = 2                                    # Gemini ek kaam me bug-scan
 GEM_BUILD_STEPS = 3                                 # shuru ke itne kadam Gemini banaye, phir JAAT/Groq/DS
 PLAN_GAP_ROUNDS = 2
 MEMO_FILE = "MEMORY.md"
-CODE_WRITE_PREF = ("JAAT", "GROQ", "DS")
-CODE_PLAN_PREF = ("GEM", "GEM2", "GEM3", "JAAT")
+CODE_WRITE_PREF = ("JAAT", "HAIKU", "GROQ", "DS", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25", "GEM", "GEM2", "GEM3", "DAI", "UAI", "DSX")
+CODE_PLAN_PREF = ("DSX", "HAIKU", "GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2")
 # level -> (lines kam se kam, lines zyada se zyada, files)
 LEVEL_SCOPE = {1: (50, 100, 1), 2: (100, 200, 1), 3: (200, 400, 2), 4: (400, 700, 3), 5: (700, 1000, 4),
                6: (1000, 1500, 5), 7: (1500, 2500, 7), 8: (2500, 4000, 9), 9: (4000, 6000, 12), 10: (6000, 10000, 15)}
@@ -7434,13 +7505,13 @@ PIPE_EXACT_MAX = int(_env("PIPE_EXACT_MAX", "2"))                   # wahi bug 2
 PIPE_STEP_LINES = int(_env("PIPE_STEP_LINES", "500"))               # JAAT ek file me itni line se zyada nahi likh paata (~10k token)
 PIPE_FILES_MAX = 25
 PIPE_OUT = int(_env("PIPE_OUT_TOKENS", "64000"))                    # plan / bug-list / exact-fix me jawab ki upari hadd (provider ki apni hadd se zyada nahi jaata)
-PLAN_PREF = ("DSX", "HAIKU", "GEM", "GEM2", "GEM3", "JAAT")                  # plan: DSX, band ho to Gemini, phir JAAT
-WRITE_PREF = ("JAAT", "GEM", "GEM2", "GEM3", "NV2")                 # likhai: JAAT, band ho to Gemini
-FIX_PREF = ("JAAT", "GEM", "GEM2", "GEM3", "NV2")                   # bug theek karna: JAAT
-CHECK_PREF = ("DS", "GROQ", "NV2")                                  # chhoti jaanch + "bug gaya ya nahi" confirm
-FINAL_PREF = ("DSX", "HAIKU", "GEM", "GEM2", "GEM3", "JAAT")                 # poore project ki aakhri jaanch
-EXPLAIN_PREF = ("GEM", "GEM2", "GEM3", "JAAT", "NV2", "GROQ")       # end me setup samjhane wale
-CHAT_PREF = ("DS", "GROQ", "NV2")                                   # sirf baat / chhota sawal
+PLAN_PREF = ("DSX", "HAIKU", "GEM", "GEM2", "GEM3", "GROQ", "NV2")       # plan: DSX/Haiku/Gemini; JAAT planner nahi
+WRITE_PREF = ("JAAT", "HAIKU", "GEM", "GEM2", "GEM3", "NV2", "GROQ", "DSF41", "MIMO26", "DSF4", "MIMO25", "DS", "DAI", "UAI", "DSX")  # JAAT primary coder, Haiku backup writer
+FIX_PREF = ("JAAT", "HAIKU", "GEM", "GEM2", "GEM3", "NV2", "GROQ", "DSF41", "MIMO26", "DSF4", "MIMO25", "DS", "DAI", "UAI", "DSX")  # JAAT/Haiku bug-fix team
+CHECK_PREF = ("DS", "GROQ", "NV2", "HAIKU", "DSF41", "MIMO26", "DSF4", "MIMO25")  # independent code checks
+FINAL_PREF = ("DSX", "HAIKU", "GEM", "GEM2", "GEM3", "GROQ", "NV2")         # final audit: architect/reviewers, not JAAT writer
+EXPLAIN_PREF = ("HAIKU", "GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2")       # setup explanation, not JAAT
+CHAT_PREF = ("HAIKU", "GROQ", "DS", "DAI", "UAI", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")  # normal chat never JAAT
 PIPE_ST = {}                                                        # chalti pipeline ki halat (disk par .mumbai/pipe.json me bhi)
 PIPE_LOCK = threading.RLock()
 CHECK_EXT = (".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".html", ".kt", ".java", ".go", ".rs", ".c", ".cpp", ".sh", ".css")
@@ -8247,7 +8318,7 @@ def modify_job(f):
     card_update(rel, ai=False)
     if not ok:
         _pst_add("warn", "%s: jaanch abhi bhi fail: %s" % (rel, clip(out.replace("\n", " "), 110)))
-    return {"rel": rel, "ok": ok, "who": "JAAT", "out": out}
+    return {"rel": rel, "ok": ok, "who": PIPE_ST.get("last_fixer") or "writer team", "out": out}
 
 
 def write_job(f):
@@ -8275,9 +8346,27 @@ def fix_file(rel, bugs, extra=""):
     old = _read(rel, 400000)
     nlines = old.count("\n") + 1
     bp = PIPE_ST.get("bp")
-    user = "%sCARDS (real names of other files):\n%s\n\n%sBUGS TO FIX in %s:\n%s\n\nFILE %s (with line numbers):\n%s" % (
+    head = "%sCARDS (real names of other files):\n%s\n\n%sBUGS TO FIX in %s:\n%s\n\n" % (
         ("PLAN/CONTRACT:\n%s\n\n" % contract_text(bp, 5000)) if bp else "", memory_text(3500) or "-", (extra + "\n\n") if extra else "",
-        rel, bug_lines(bugs), rel, _numbered(old))
+        rel, bug_lines(bugs))
+    # Badi file ko poora prompt me daalne se HAIKU/backup models ctx limit ke kaaran skip ho jaate the.
+    # Edit blocks ke liye sirf bug lines ke aas-paas ke exact numbered excerpts kaafi hain.
+    if nlines > 500 or len(old) > 65000:
+        excerpts = []
+        used_lines = set()
+        for bug in bugs[:5]:
+            try:
+                ln = int(bug.get("line") or 1)
+            except (TypeError, ValueError):
+                ln = 1
+            excerpt = _window(old, ln, 10000)
+            if excerpt and excerpt not in excerpts:
+                excerpts.append(excerpt)
+        if not excerpts:
+            excerpts.append(_window(old, 1, 12000))
+        user = head + ("LARGE FILE: poori file prompt me nahi bheji gayi. Neeche exact line-numbered excerpts hain. Sirf EDIT blocks do; unke SEARCH ko diye gaye code se bilkul match karo.\n\nFILE %s excerpts:\n%s" % (rel, "\n\n--- NEXT EXCERPT ---\n\n".join(excerpts)))
+    else:
+        user = head + "FILE %s (with line numbers):\n%s" % (rel, _numbered(old))
     strict = os.path.splitext(rel)[1].lower() in INDENT_EXT
     old_err = syntax_error_of(rel, old)
     modes = ("full",) if nlines <= 120 else ("edit", "full")
@@ -8314,6 +8403,7 @@ def fix_file(rel, bugs, extra=""):
                 continue
             put_file(rel, new, nm, kind="EDIT" if mode == "edit" else "WRITE",
                      show=("badlav (%d bug):\n%s" % (len(bugs), clip(shown, 2800))) if mode == "edit" else None)
+            PIPE_ST["last_fixer"] = nm
             return True
     return False
 
@@ -9321,15 +9411,15 @@ def run_agent(task):
 
 
 # ================= 25/26 (21.py, v5.6): JAAT sirf likhe | baat/sawal: Groq/DS/DAI, padhai: Gemini | shuru me user se poochho | galat bana: Gemini -> DSX =================
-VERSION = "5.6"
+VERSION = "5.8"
 ASK_WAIT = float(_env("ASK_WAIT", "600"))                           # user ke jawab ka intezaar 10 min (phir 3 AI faisla karte hain)
 ASK_FIRST = _env("ASK_FIRST", "1") != "0"                           # 0 = naye kaam par shuru ke sawal band
-CHAT_PREF = ("HAIKU", "GROQ", "DS", "DAI", "UAI", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")                            # sirf baat: JAAT KABHI NAHI
-STUDY_PREF = ("HAIKU", "GROQ", "DS", "DAI", "UAI", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")                           # padhai / GK sawal: Gemini NAHI (uski limit bachao): Groq, DS, DeepAI, NV2
-TRIAGE_PREF = ("GEM2", "GEM", "GEM3", "GROQ", "DS", "NV2", "HAIKU", "DSF41", "MIMO26", "DSF4", "MIMO25")          # dikkat/photo dekhne wala: Gemini fast (GEM2 think=0 pehle)
-QA_PREF = ("GROQ", "NV2", "GEM", "GEM2", "GEM3", "HAIKU", "DSF41", "MIMO26", "DSF4", "MIMO25")                   # project ke sawal: pehle Groq/NV2, Gemini sirf backup
-EXPLAIN_PREF = ("GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2", "HAIKU", "DSF41", "MIMO26", "DSF4", "MIMO25")         # setup samjhana / project ke sawal: JAAT nahi
-EXAM_PREF = ("GEM", "GROQ", "GEM2", "GEM3", "DS", "HAIKU", "DSF41", "MIMO26", "DSF4", "MIMO25")                   # task samajhne wale: JAAT nahi
+CHAT_PREF = ("HAIKU", "GROQ", "DS", "DAI", "UAI", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")  # general chat; JAAT excluded
+STUDY_PREF = ("HAIKU", "GROQ", "DS", "DAI", "UAI", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")  # explanations/study; JAAT excluded
+TRIAGE_PREF = ("GEM2", "GEM", "GEM3", "HAIKU", "GROQ", "DS", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")  # Gemini vision/triage; Haiku backup
+QA_PREF = ("HAIKU", "GROQ", "NV2", "GEM", "GEM2", "GEM3", "DSF41", "MIMO26", "DSF4", "MIMO25", "DS", "DAI", "UAI", "DSX", "JAAT")  # all providers can answer project/file questions via cards + NEED/READ
+EXPLAIN_PREF = ("HAIKU", "GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")  # no JAAT
+EXAM_PREF = ("GEM", "HAIKU", "GROQ", "GEM2", "GEM3", "DS", "DSF41", "MIMO26", "DSF4", "MIMO25")  # task understanding, no JAAT
 
 
 def ask_user(question, options=None, ctx=""):
