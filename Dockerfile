@@ -9,7 +9,7 @@ RUN mkdir -p /data /app && chmod 777 /data
 VOLUME ["/data"]
 WORKDIR /app
 RUN pip install --no-cache-dir pypdf
-COPY 21.py /app/21.py
+COPY 22.py /app/22.py
 EXPOSE 8080
 USER 1000:1000
-CMD ["python", "/app/21.py"]
+CMD ["python", "/app/22.py"]
