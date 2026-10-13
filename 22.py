@@ -5776,7 +5776,24 @@ footer textarea{flex:1;max-height:130px;resize:none;border:1px solid var(--bd);b
 .rev{border-left:3px solid #2e9e5b;padding-left:10px;font-size:14px}.rev.badr{border-left-color:#c0392b}
 .row{display:flex;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--bd)}
 .row span{flex:1;word-break:break-all}.row a{color:var(--acc);text-decoration:none;font-size:20px;cursor:pointer}
-#cta{flex:1;max-height:none;margin:6px 12px 10px;font:12px/1.4 monospace;border-radius:10px;white-space:pre;border:1px solid var(--bd);background:var(--bg);color:var(--fg);padding:8px}
+#cbody{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:8px 12px 28px}
+#cst{display:flex;flex-direction:column;gap:10px}
+.pc{border:1px solid var(--bd);border-radius:14px;overflow:hidden}
+.ph{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer}
+.ph .nm{flex:1;font-weight:600}.ph small{color:var(--mut);white-space:nowrap}
+.dotb{border:1px solid var(--bd);background:var(--card);border-radius:50%;width:36px;height:36px;font-size:16px;flex:none;padding:0}
+.pm{border-top:1px solid var(--bd);padding:8px 10px}
+.ml{max-height:55vh;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column}
+.mr{display:flex;align-items:center;gap:10px;padding:11px 4px;border-bottom:1px solid var(--bd);cursor:pointer}
+.mr:last-child{border-bottom:0}
+.mr .mn{flex:1;min-width:0;word-break:break-all;font-size:15px}
+.mr.off .mn{opacity:.45;text-decoration:line-through}
+.sw{flex:none;width:44px;height:26px;border-radius:13px;background:#8886;position:relative;transition:background .15s}
+.sw::after{content:'';position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .15s}
+.mr:not(.off) .sw{background:#2e9e5b}
+.mr:not(.off) .sw::after{left:21px}
+#cjt{margin:14px 0 8px;width:100%;text-align:left}
+#cta{display:none;width:100%;height:60vh;font:12px/1.4 monospace;border-radius:10px;white-space:pre;overflow:auto;border:1px solid var(--bd);background:var(--bg);color:var(--fg);padding:8px}
 .md{white-space:normal}.md p{margin:0 0 .7em}.md p:last-child{margin-bottom:0}
 .md h1,.md h2,.md h3{margin:.9em 0 .4em;line-height:1.3}.md h1{font-size:1.3em}.md h2{font-size:1.15em}.md h3{font-size:1.02em}
 .md ul,.md ol{margin:0 0 .7em;padding-left:1.4em}.md li{margin:.15em 0}
@@ -5881,8 +5898,9 @@ footer textarea{min-height:54px;max-height:200px;padding:15px 18px;line-height:1
 <button class=ib onclick="saveConf()">💾 Save</button>
 <button class=ib onclick="unlockAll()">🔓</button>
 <button class=ib onclick="document.getElementById('csheet').style.display='none'">✕</button></div>
-<div id=cst style="padding:6px 12px;display:flex;flex-wrap:wrap;gap:4px"></div>
-<textarea id=cta spellcheck=false></textarea></div>
+<div id=cbody><div id=cst></div>
+<button class=ib id=cjt onclick="toggleCj()">🧾 Advanced JSON ▸</button>
+<textarea id=cta spellcheck=false></textarea></div></div>
 <script>
 var lastKind='',last=0,running=false,sending=false,polling=false,redo=false,boot='',chat=document.getElementById('chat'),sheet=document.getElementById('sheet'),psheet=document.getElementById('psheet');
 function el(tag,cls,txt){var e=document.createElement(tag);if(cls)e.className=cls;if(txt!=null)e.textContent=txt;return e}
@@ -6056,18 +6074,32 @@ function openProjects(){psheet.style.display='flex';
    d.appendChild(r)})})}
 function newProject(){var n=prompt('Naye project ka naam:');if(n&&n.trim())act2('/project',{name:n.trim()}).then(function(){closeProjects();poll()})}
 function closeProjects(){psheet.style.display='none'}
-function openConf(){document.getElementById('csheet').style.display='flex';
- fetch('/config').then(function(r){return r.json()}).then(function(j){document.getElementById('cta').value=j.conf;
+var openProv={},cjOpen=false;
+function toggleCj(){cjOpen=!cjOpen;drawCj()}
+function drawCj(){document.getElementById('cta').style.display=cjOpen?'block':'none';document.getElementById('cjt').textContent='🧾 Advanced JSON '+(cjOpen?'▾':'▸')}
+function openConf(){var cb=document.getElementById('cbody'),keep=cb.scrollTop;document.getElementById('csheet').style.display='flex';
+ fetch('/config').then(function(r){return r.json()}).then(function(j){var ta=document.getElementById('cta');if(document.activeElement!==ta)ta.value=j.conf;drawCj();
   var s=document.getElementById('cst');s.innerHTML='';
-  var h=el('div','note','👆 chip dabao: 🔒 ho to cooldown hatega, warna ON/OFF');h.style.width='100%';s.appendChild(h);
-  j.status.forEach(function(x){var c=el('div','note',(x.off?'⛔':(x.ready?(x.cool?'🔒':'🟢'):'⚪'))+' '+x.name+' · '+x.group+(x.cool?' · '+(x.cool<90?x.cool+' sec':Math.ceil(x.cool/60)+' min'):''));
-   c.style.cursor='pointer';c.onclick=function(){post(x.cool&&!x.off?'/unlock':'/toggle',{name:x.name}).then(function(){openConf()})};s.appendChild(c);
-   if(x.models&&x.models.length>1){var nOff=x.models.filter(function(m){return m.off}).length;
-    var t=el('div','note','📋 '+x.name+' ke models ('+(x.models.length-nOff)+'/'+x.models.length+' chalu) '+(openProv[x.name]?'▾':'▸'));t.style.cursor='pointer';t.style.width='100%';
-    t.onclick=function(){openProv[x.name]=!openProv[x.name];openConf()};s.appendChild(t);
-    if(openProv[x.name]){x.models.forEach(function(m){var mc=el('div','note',(m.off?'⛔ ':'🟢 ')+m.m);mc.style.cursor='pointer';
-     mc.onclick=function(){post('/toggle_model',{name:x.name,model:m.m}).then(function(){openConf()})};s.appendChild(mc)})}}})})}
-var openProv={};
+  var h0=el('div','note','👆 gol button: 🔒 ho to cooldown hatega, warna ON/OFF. Naam dabao to models khulenge.');s.appendChild(h0);
+  j.status.forEach(function(x){
+   var card=el('div','pc'),h=el('div','ph'),ms=x.models||[];
+   var dot=el('button','dotb',x.off?'⛔':(x.ready?(x.cool?'🔒':'🟢'):'⚪'));
+   dot.onclick=function(e){e.stopPropagation();post(x.cool&&!x.off?'/unlock':'/toggle',{name:x.name}).then(function(){openConf()})};
+   h.appendChild(dot);h.appendChild(el('span','nm',x.name));
+   h.appendChild(el('small',null,x.group+(x.cool?' · '+(x.cool<90?x.cool+' sec':Math.ceil(x.cool/60)+' min'):'')));
+   if(ms.length>1){var nOff=ms.filter(function(m){return m.off}).length;
+    h.appendChild(el('small',null,(ms.length-nOff)+'/'+ms.length+' '+(openProv[x.name]?'▾':'▸')));
+    h.onclick=function(){openProv[x.name]=!openProv[x.name];openConf()}}
+   card.appendChild(h);
+   if(ms.length>1&&openProv[x.name]){var pm=el('div','pm'),ml=el('div','ml');
+    if(ms.length>10){var q=el('input','mq');q.placeholder='🔎 model dhundho';
+     q.oninput=function(){var v=q.value.toLowerCase();Array.prototype.forEach.call(ml.children,function(c){c.style.display=c.dataset.n.indexOf(v)<0?'none':''})};pm.appendChild(q)}
+    ms.forEach(function(m){var mc=el('div','mr'+(m.off?' off':''));mc.dataset.n=m.m.toLowerCase();
+     mc.appendChild(el('span','mn',m.m));mc.appendChild(el('span','sw'));
+     mc.onclick=function(){post('/toggle_model',{name:x.name,model:m.m}).then(function(){m.off=!m.off;mc.className='mr'+(m.off?' off':'')})};ml.appendChild(mc)});
+    pm.appendChild(ml);card.appendChild(pm)}
+   s.appendChild(card)});
+  cb.scrollTop=keep})}
 function saveConf(){post('/config',{conf:document.getElementById('cta').value}).then(function(r){return r.text()}).then(function(t){alert(t);openConf()})}
 function unlockAll(){post('/unlock').then(function(){openConf()})}
 </script></body></html>"""
@@ -6904,14 +6936,14 @@ PLAN_SYS = ("You plan ONE software task as a senior engineer. Reply ONLY JSON, n
             "unless the task names them. Keep steps minimal. If the TASK says how many files to make, use exactly that many. "
             "Respect the user's answers. For an Android app step 1 is '@@TEMPLATE android <package> <AppName>' and the build is on GitHub Actions. "
             "Write short plain lines (Hinglish ok).")
-MERGE_PLAN_SYS = ("You get several plans (JSON) for the SAME task. Merge them into ONE best plan: keep the SMALLEST set of files, UI, "
-                  "steps and spec lines that fully does the TASK and BRIEF; drop duplicates and every extra the task did not ask for; keep the size right for LEVEL. Reply ONLY JSON with the same schema "
+MERGE_PLAN_SYS = ("You get several plans (JSON) for the SAME task. Merge them into ONE best plan: keep every file, UI part, "
+                  "step and spec line the TASK and BRIEF need; merge duplicates and leave out extras the task did not ask for; keep the size right for LEVEL. Reply ONLY JSON with the same schema "
                   "{files,ui,advanced,steps,spec}.")
-GAP_SYS = ("You check a PLAN against the TASK and BRIEF. List ONLY what is missing without which the requested thing will NOT work at all. "
-           "Do NOT list deployment/hosting config, webhooks, docs, extra features, scaling or edge-case polish; stay inside the BRIEF. "
-           "Each item max 12 words. Reply ONLY JSON: {\"missing\":[\"...\"]}. Use [] if nothing essential is missing (this is the normal answer).")
+GAP_SYS = ("You check a PLAN against the TASK and BRIEF. List what is missing and would make the thing fail, or leave the user with something clearly unfinished. "
+           "Stay inside the BRIEF: deployment config, docs and edge-case polish count only when the BRIEF asks for them. "
+           "Each item max 12 words. Reply ONLY JSON: {\"missing\":[\"...\"]}. Use [] only when the plan is really complete.")
 FIX_PLAN_SYS = ("You get a PLAN (JSON) and a MISSING list. Return the improved full plan as ONLY JSON with the same schema "
-                "{files,ui,advanced,steps,spec}, with ONLY the missing items added; keep the plan small.")
+                "{files,ui,advanced,steps,spec}, with the missing items added; leave the rest as it is.")
 
 
 def _plan_ok(d):
@@ -7517,7 +7549,8 @@ PIPE_EXACT_MAX = int(_env("PIPE_EXACT_MAX", "2"))                   # wahi bug 2
 PIPE_STEP_LINES = int(_env("PIPE_STEP_LINES", "500"))               # JAAT ek file me itni line se zyada nahi likh paata (~10k token)
 PIPE_FILES_MAX = 25
 PIPE_OUT = int(_env("PIPE_OUT_TOKENS", "64000"))                    # plan / bug-list / exact-fix me jawab ki upari hadd (provider ki apni hadd se zyada nahi jaata)
-PLAN_PREF = ("GROQ", "NV2", "DSX")       # plan: DSX/Haiku/Gemini; JAAT planner nahi
+PLAN_PREF = ("NV2", "DSX")       # plan ka backup (GROQ plan se bahar); pehle plan_slots() ke JAAT reasoning models
+PLAN_TMO = int(_env("PLAN_TIMEOUT", "900"))   # plan ke liye kul intezaar (sec)
 WRITE_PREF = ("JAAT", "GROQ", "NV2", "DSX")  # JAAT primary coder, Haiku backup writer
 FIX_PREF = ("JAAT", "GROQ", "NV2", "DSX")  # JAAT/Haiku bug-fix team
 CHECK_PREF = ("GROQ", "NV2")  # independent code checks
@@ -7574,7 +7607,7 @@ def avail(prefs, size=0):
     return out
 
 
-def gen_call(nm, system, user, mt=None, tries=2):
+def gen_call(nm, system, user, mt=None, tries=2, model=None, tmo=None):
     """(text, kata_hua?) ya None. Ek khaas provider se (ask_oai khud 429/413/530 sambhalta hai). mt = jawab ki hadd (provider ki apni hadd se zyada nahi)."""
     cfg0 = APIS.get(nm)
     if not cfg0:
@@ -7583,6 +7616,11 @@ def gen_call(nm, system, user, mt=None, tries=2):
         if STATE["cancel"]:
             return None
         cfg = dict(cfg0)
+        if model:
+            cfg["models"] = [model]
+        if tmo:                                   # reasoning model pehle andar sochta hai: lamba intezaar
+            cfg["timeout"] = max(cfg0.get("timeout", 60), 180)
+            cfg["total_timeout"] = max(cfg0.get("total_timeout", 300), int(tmo))
         if cfg["type"] == "oai":
             cap = int(cfg0.get("max_tokens") or MAX_TOKENS)
             cfg["max_tokens"] = min(int(mt), cap) if mt else cap
@@ -7972,13 +8010,15 @@ def card_update(rel, ai=False):
 
 # ---------- 2) DSX ka plan (blueprint) ----------
 PLAN_SYS_PIPE = (
-    "You are the lead architect of a software project. The files will be written by OTHER AI writers: each writer writes ONE file per request and several writers work at the same time, "
-    "they cannot see each other's files. Reply with ONLY one JSON object, no prose, no code fence: "
-    '{"summary":"one line: what is built","stack":"language/framework and where it runs","notes":"shared rules: naming, data formats, constants, ids, keys that more than one file uses",'
+    "You are the lead architect of a software project. Your plan decides whether the project works or breaks: OTHER AI writers will write each file at the same time, ONE file per request, "
+    "and the contract you write is the only thing they share. Be thorough: a thin plan gives files that do not fit together. "
+    "The writers cannot see each other's files. Reply with ONLY one JSON object, no prose, no code fence: "
+    '{"design":"10-20 lines, think here first: (a) what the user really wants and what finished looks like to them; (b) the whole user journey: every screen/page/endpoint, what it shows or does, how the user moves between them; (c) everything many files share (data shapes, storage keys, ids, routes, theme, helpers) and the exact form you fix for each; (d) the 3 hardest parts, what could break and how the plan avoids it","summary":"one line: what is built","stack":"language/framework and where it runs","notes":"shared rules: naming, data formats, constants, ids, keys that more than one file uses",'
     '"files":[{"path":"main.py","purpose":"what this file does","group":1,"max_lines":300,"exports":["name(arg1, arg2) -> return type : meaning"],"imports":["other.py: nameA, nameB"]}],'
     '"commands":{"setup":["..."],"run":["..."],"deploy":["..."],"test":["..."]},"env":["NAME: where to get it"],"spec":["checkable behaviour"]}. '
     "RULES: "
-    "1) Use the SMALLEST set of files that fully does the TASK. No extras the task did not ask for (no docs, CI or Docker unless the task needs them). Keep the user's own file names/folders if the task names them. "
+    "1) Plan every file the TASK needs to run well and to feel finished to the user. Put nice-to-have extras in the notes under 'optional' instead of in files (docs, CI, Docker only when the task needs them). Keep the user's own file names/folders if the task names them. "
+    "1b) BIG TASKS (many screens or features): split by screen/feature. Each screen gets its own file(s) and its own purpose line; shared things (config, constants, data layer, shared UI, theme) go in an early group. Do not squeeze many screens into one file. "
     "2) One writer produces at most MAXL lines per file (about 10k tokens), so every file must stay at or below MAXL lines (set a realistic max_lines per file); split bigger features into modules. "
     "3) CONTRACT: for EVERY file list exports with exact names, parameter lists and return shape, and imports with the exact names it takes from other project files. "
     "Everything two files share (function names, route paths, element ids, JSON keys, storage keys, env variable names, message formats) must be fixed HERE (use notes for shared formats), because the writers cannot talk. "
@@ -7987,7 +8027,7 @@ PLAN_SYS_PIPE = (
     "5) Include every dependency/manifest file the project needs to start (requirements.txt, package.json with \"type\":\"module\" for ES modules, wrangler.toml, Procfile ...). "
     "6) commands: exact shell commands. setup = install, run = start, deploy = deploy to a FREE hosting that works today (keys and tokens only as environment variables), "
     "test = ONLY real checks that run offline (python -m py_compile f.py, node --check f.js, pytest, node test.mjs); if you list a test file command, that test file must be in files. "
-    "7) env: every secret/environment variable and where to get it. 8) spec: 4-8 behaviours checkable by reading or running, including empty/invalid input and errors. "
+    "7) env: every secret/environment variable and where to get it. 8) spec: 6-12 behaviours checkable by reading or running, including the main user journey, empty/invalid input and errors. "
     "Strings short and plain; identifiers in English; purpose may be Hinglish.")
 
 
@@ -8157,12 +8197,53 @@ def existing_block():
     return ", ".join(parts) + (("\n\nCARDS/OUTLINE of the existing code (real names, line numbers):\n" + cards) if cards else "")
 
 
+PLAN_DEFAULT = ("gpt-5.6-luna", "gpt-5.4-mini", "gem-flash-3.7")
+
+
+def plan_slots():
+    """[(provider, model)] jo plan banaye, is order me. PLAN_MODEL env: 'JAAT:gpt-5.6-luna,JAAT:gem-flash-3.7'. Khali ho to PLAN_DEFAULT (JAAT ke reasoning models). Jo model providers.json me nahi ya band hai wo chhod diya jata hai."""
+    out = []
+
+    def add(nm, m):
+        cfg = APIS.get(nm) or {}
+        if (nm, m) not in out and m in (cfg.get("models") or ()) and m not in (cfg.get("off_models") or ()):
+            out.append((nm, m))
+    for w in [x.strip() for x in _env("PLAN_MODEL", "").split(",") if x.strip()]:
+        if ":" in w:
+            n1, m1 = w.split(":", 1)
+            add(n1.strip(), m1.strip())
+    if not out:
+        for m in PLAN_DEFAULT:
+            add("JAAT", m)
+    return out[:4]
+
+
 def make_blueprint(task):
     """(bp, provider) ya (None, ''). DSX plan banata hai; band/fail ho to Gemini, phir JAAT."""
     user = ("TASK:\n%s\n\nEXISTING FILES: %s\n\nHARD LIMITS: one writer writes at most %d lines per file. "
             "The user is not technical: choose the simplest stack that runs on a FREE service, secrets only as environment variables." % (
                 (PIPE_ST.get("task") or task)[:4000], existing_block(), PIPE_STEP_LINES))
     sysmsg = PLAN_SYS_PIPE.replace("MAXL", str(PIPE_STEP_LINES)) + (PLAN_EXISTING_RULES if project_has_files() else "")
+    def _finish(bp, d):
+        dz = clip(str((d or {}).get("design") or "").strip(), 900)
+        if dz:
+            bp["notes"] = clip("DESIGN: " + dz + "\n" + (bp.get("notes") or ""), 1900)
+        return bp
+    for nm, md in plan_slots():
+        if STATE["cancel"]:
+            return None, ""
+        if not ready(nm) or COOL.get(nm, 0) > time.time():
+            continue
+        ev("note", text="🗳 %s (%s) plan bana raha hai - bada model pehle soch ke phir files likhta hai..." % (nm, md))
+        for t in range(2):
+            u = user if not t else user + "\n\n[Pichhla jawab sahi JSON nahi tha. Sirf ek JSON object do, files me kam se kam 1 file.]"
+            res = gen_call(nm, sysmsg, u, mt=PIPE_OUT, model=md, tmo=PLAN_TMO)
+            if not res:
+                break
+            dd = parse_json_reply(res[0])
+            bp = norm_bp(dd)
+            if bp:
+                return _finish(bp, dd), nm
     for nm in rot_prefs(PLAN_PREF):
         if STATE["cancel"]:
             return None, ""
@@ -8176,17 +8257,18 @@ def make_blueprint(task):
             res = gen_call(nm, sysmsg, u, mt=PIPE_OUT)
             if not res:
                 break
-            bp = norm_bp(parse_json_reply(res[0]))
+            dd = parse_json_reply(res[0])
+            bp = norm_bp(dd)
             if bp:
-                return bp, nm
+                return _finish(bp, dd), nm
     return None, ""
 
 
 # ---------- 3) JAAT parallel likhai: ek group ki files alag-alag request me, ek saath ----------
 WRITE_SYS = (
     "You write ONE source file of a multi-file project exactly as the PLAN/CONTRACT says. Other files are written by other writers at the same time, so use ONLY the names, "
-    "signatures, routes, ids, keys and environment variables that the CONTRACT gives (and the real code/cards of ALREADY WRITTEN files, which are the truth). Never invent a different name "
-    "for something the contract defines, and never import a name the contract does not list. Write the COMPLETE, working file: no placeholders, no 'rest of the code', no TODO stubs, "
+    "signatures, routes, ids, keys and environment variables that the CONTRACT gives (and the real code/cards of ALREADY WRITTEN files, which are the truth). Use exactly the names the contract gives; "
+    "when the contract has no name for something, pick the simplest name and move on, and import only names the contract lists. Write the COMPLETE, working file: no placeholders, no 'rest of the code', no TODO stubs, "
     "real error handling for empty/invalid input. At most MAXL lines. Reply with ONLY the file content inside ONE fenced code block, nothing before or after it.")
 CONT_SYS = (
     "A source file was cut off at the output limit. You get the last lines written so far. Continue EXACTLY with the next line and finish the file. "
