@@ -743,6 +743,18 @@ def conf_write():
         log("providers.json save fail: %s" % e)
 
 
+def merge_priority():
+    """Purani providers.json ke priority me naye provider (GROK, DSPRO, KIMI, LUNA...) nahi hote the, isliye ⚙ panel me dikhte hi nahi
+    the aur use bhi nahi hote the. Jo provider APIS me hai par PRIORITY me nahi, use uski default jagah par jod do."""
+    for i, n in enumerate(DEFAULT_PRIORITY):
+        if n in APIS and n not in PRIORITY:
+            prev = next((p for p in reversed(DEFAULT_PRIORITY[:i]) if p in PRIORITY), None)
+            PRIORITY.insert(PRIORITY.index(prev) + 1 if prev else 0, n)
+    for n in APIS:                       # providers.json se aaya koi bilkul naya naam bhi last me jud jaye
+        if n not in PRIORITY:
+            PRIORITY.append(n)
+
+
 def conf_apply(text, write=False):
     """JSON text se providers/priority badalta hai (galat ho to ValueError, kuch nahi badalta)."""
     try:
@@ -776,6 +788,7 @@ def conf_apply(text, write=False):
         (DISABLED.add if dis else DISABLED.discard)(name)
     if pr is not None:
         PRIORITY[:] = [n for n in pr if n in APIS]
+    merge_priority()
     if write:
         conf_write()
     return "✅ save ho gaya, turant lagu (rebuild nahi chahiye)"
