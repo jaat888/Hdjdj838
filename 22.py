@@ -6939,9 +6939,11 @@ PLAN_SYS = ("You plan ONE software task as a senior engineer. Reply ONLY JSON, n
 MERGE_PLAN_SYS = ("You get several plans (JSON) for the SAME task. Merge them into ONE best plan: keep every file, UI part, "
                   "step and spec line the TASK and BRIEF need; merge duplicates and leave out extras the task did not ask for; keep the size right for LEVEL. Reply ONLY JSON with the same schema "
                   "{files,ui,advanced,steps,spec}.")
-GAP_SYS = ("You check a PLAN against the TASK and BRIEF. List what is missing and would make the thing fail, or leave the user with something clearly unfinished. "
-           "Stay inside the BRIEF: deployment config, docs and edge-case polish count only when the BRIEF asks for them. "
-           "Each item max 12 words. Reply ONLY JSON: {\"missing\":[\"...\"]}. Use [] only when the plan is really complete.")
+GAP_SYS = (
+    "You check a PLAN against the TASK and BRIEF. Find what is missing or inconsistent and would make the project fail to run or leave the user with something clearly unfinished. "
+    "Check each of these: a step of the user journey with no screen/file; a name used by two files but not fixed in the contract; a SPEC line no file can satisfy; a missing manifest or dependency; a file that imports a file of the same or a later group. "
+    "Deployment config and docs count only when the BRIEF asks for them. Each item max 12 words. "
+    'Reply ONLY JSON: {"missing":["..."]}. Use [] only when you checked every point above and found nothing.')
 FIX_PLAN_SYS = ("You get a PLAN (JSON) and a MISSING list. Return the improved full plan as ONLY JSON with the same schema "
                 "{files,ui,advanced,steps,spec}, with the missing items added; leave the rest as it is.")
 
@@ -7389,12 +7391,12 @@ VERSION = "5.3"
 LEAN = _env("LEAN", "1") != "0"
 NEW_RULES = """
 NAYE NIYAM (inhe sabse upar maano):
-A. Tum asli AI sahayak ho, command-bot nahi. User ka maqsad samjho aur sawal mat poochho: tech stack, hosting, chhote faisle khud lo. User kahe "mujhe nahi pata" to faisla tumhara.
+A. Tum asli AI sahayak ho, command-bot nahi. User ka maqsad samjho: tech stack, hosting, chhote faisle khud lo, unke sawal mat poochho. User kahe "mujhe nahi pata" to faisla tumhara. Sirf tab ek sawal poochho jab ye hi saaf na ho ki app/cheez KARTI kya hai.
 B. Naya app/bot/site banane ya library/tool/hosting chunne se pehle 1-2 baar @@SEARCH karo (abhi latest kya chal raha hai, kya free hai) aur sirf wahi chuno jo abhi sach me chal raha ho. Purani yaad par bharosa mat karo.
 C. Jab tak user alag na bole, FREE service par chalne layak banao: kam dependency, ek hi service par chale, keys/token environment variable me.
 D. Seedha kaam karo: bade @@WRITE (500-600 line tak) ek baar me. Wahi file baar-baar @@READ mat karo. SPEC/PLAN sirf bade kaam me, aur chhota. @@NOTE jawab dene ke liye nahi hai.
 E. @@DONE ke saar me user se seedhi baat, saaf Hinglish me: kya bana, kaise chalana hai (steps), aur kahan FREE me host karein (kaun si service, kaise deploy, kya dhyan rakhna).
-F. Sirf wahi banao jo user ne maanga. Ek cheez maangi to doosra project ya extra feature mat banao.
+F. Wahi banao jo user ne maanga, poora aur asli jaisa. Uske saath jo zaroori hisse hote hain (empty/error screen, settings ya about) theek hain; par doosra alag project ya bekaar extra feature mat banao.
 """
 if LEAN:
     READ_FIRST, REVIEW = False, False                 # file dobara padhne ki zabardasti band
@@ -7543,8 +7545,8 @@ def mode_note(short=False):
 # PIPE=0 do to 5.3 jaisa purana raasta. LEAN=0 ho to ye pipeline band hi rehti hai.
 VERSION = "5.4"
 PIPE = bool(LEAN) and _env("PIPE", "1") != "0"
-PIPE_ROUNDS = max(1, int(_env("PIPE_ROUNDS", "5")))                 # DSX ke aakhri jaanch ke max round
-PIPE_PAR = max(1, min(4, int(_env("PIPE_PAR", "3"))))               # JAAT ek saath itni files likhe
+PIPE_ROUNDS = max(1, int(_env("PIPE_ROUNDS", "3")))                 # DSX ke aakhri jaanch ke max round
+PIPE_PAR = max(1, min(4, int(_env("PIPE_PAR", "4"))))               # JAAT ek saath itni files likhe
 PIPE_EXACT_MAX = int(_env("PIPE_EXACT_MAX", "2"))                   # wahi bug 2+ baar aaye to DSX ko "exact fix do" hard prompt (kul itni baar)
 PIPE_STEP_LINES = int(_env("PIPE_STEP_LINES", "500"))               # JAAT ek file me itni line se zyada nahi likh paata (~10k token)
 PIPE_FILES_MAX = 25
@@ -8010,24 +8012,30 @@ def card_update(rel, ai=False):
 
 # ---------- 2) DSX ka plan (blueprint) ----------
 PLAN_SYS_PIPE = (
-    "You are the lead architect of a software project. Your plan decides whether the project works or breaks: OTHER AI writers will write each file at the same time, ONE file per request, "
-    "and the contract you write is the only thing they share. Be thorough: a thin plan gives files that do not fit together. "
-    "The writers cannot see each other's files. Reply with ONLY one JSON object, no prose, no code fence: "
-    '{"design":"10-20 lines, think here first: (a) what the user really wants and what finished looks like to them; (b) the whole user journey: every screen/page/endpoint, what it shows or does, how the user moves between them; (c) everything many files share (data shapes, storage keys, ids, routes, theme, helpers) and the exact form you fix for each; (d) the 3 hardest parts, what could break and how the plan avoids it","summary":"one line: what is built","stack":"language/framework and where it runs","notes":"shared rules: naming, data formats, constants, ids, keys that more than one file uses",'
+    "You are the lead architect of a software project. OTHER AI writers will write each file at the same time, ONE file per request, and they cannot see each other's files. "
+    "The contract you write is the only thing they share, so a thin or vague plan gives files that do not fit together. "
+    "Reply with ONLY one JSON object, no prose, no code fence: "
+    '{"design":"10-20 lines, the decisions you fix for the writers: (a) what the user wants and what finished looks like to them; (b) the whole user journey: every screen/page/endpoint, what it shows or does, how the user moves between them; '
+    "(c) everything many files share (data shapes, storage keys, ids, routes, theme, helpers) in the exact form you fix; (d) the 3 hardest parts and how the plan makes them work; "
+    '(e) ASSUMPTIONS: what you assumed where the user said Tum chuno or said nothing, one short line each","summary":"one line: what is built","stack":"language/framework and where it runs",'
+    '"notes":"shared rules: naming, data formats, constants, ids, keys that more than one file uses; then an optional: list of nice-to-have ideas",'
     '"files":[{"path":"main.py","purpose":"what this file does","group":1,"max_lines":300,"exports":["name(arg1, arg2) -> return type : meaning"],"imports":["other.py: nameA, nameB"]}],'
-    '"commands":{"setup":["..."],"run":["..."],"deploy":["..."],"test":["..."]},"env":["NAME: where to get it"],"spec":["checkable behaviour"]}. '
+    '"commands":{"setup":["..."],"run":["..."],"deploy":["..."],"test":["..."]},"env":["NAME: where to get it"],"spec":["WHEN ... THEN ..."]}. '
     "RULES: "
-    "1) Plan every file the TASK needs to run well and to feel finished to the user. Put nice-to-have extras in the notes under 'optional' instead of in files (docs, CI, Docker only when the task needs them). Keep the user's own file names/folders if the task names them. "
-    "1b) BIG TASKS (many screens or features): split by screen/feature. Each screen gets its own file(s) and its own purpose line; shared things (config, constants, data layer, shared UI, theme) go in an early group. Do not squeeze many screens into one file. "
-    "2) One writer produces at most MAXL lines per file (about 10k tokens), so every file must stay at or below MAXL lines (set a realistic max_lines per file); split bigger features into modules. "
-    "3) CONTRACT: for EVERY file list exports with exact names, parameter lists and return shape, and imports with the exact names it takes from other project files. "
-    "Everything two files share (function names, route paths, element ids, JSON keys, storage keys, env variable names, message formats) must be fixed HERE (use notes for shared formats), because the writers cannot talk. "
-    "4) group = 1,2,3...: files of the same group are written at the same time, so they must NOT import each other. A file that imports another file goes into a LATER group than that file. "
-    "Group 1 = config, constants, manifests (package.json, requirements.txt, wrangler.toml ...). 2-3 files per group is ideal. "
-    "5) Include every dependency/manifest file the project needs to start (requirements.txt, package.json with \"type\":\"module\" for ES modules, wrangler.toml, Procfile ...). "
-    "6) commands: exact shell commands. setup = install, run = start, deploy = deploy to a FREE hosting that works today (keys and tokens only as environment variables), "
-    "test = ONLY real checks that run offline (python -m py_compile f.py, node --check f.js, pytest, node test.mjs); if you list a test file command, that test file must be in files. "
-    "7) env: every secret/environment variable and where to get it. 8) spec: 6-12 behaviours checkable by reading or running, including the main user journey, empty/invalid input and errors. "
+    "1) Plan what the task needs to work well and to feel finished to the user: real screens, real data flow, empty/loading/error states. Keep the user's own file names and folders. "
+    "BIG TASKS (many screens or features): split by screen/feature, each screen gets its own file(s) and purpose line, and shared things (config, constants, data layer, shared UI, theme) go in an early group. "
+    "If the task needs a cloud account or keys the user may not have yet, make the app work first with local storage and sample data, keep the cloud part behind ONE data-layer file, and say in notes which data is local. "
+    "2) One writer produces at most MAXL lines per file (about 10k tokens), so set a realistic max_lines per file and split bigger features into modules. "
+    "3) CONTRACT: for EVERY file list exports with exact names, parameters and return shape, and imports with the exact names it takes from other project files. "
+    "Why: a writer who sees 'loadUser(id) -> {name, email}' writes code that fits; a vague name makes two files disagree. "
+    "Everything two files share (function names, route paths, element ids, JSON keys, storage keys, env variable names, message formats) is fixed HERE, because the writers cannot talk. "
+    "4) group = 1,2,3...: files of the same group are written at the same time, so they must not import each other, and a file that imports another goes into a LATER group. "
+    "Group 1 = config, constants, manifests. Fewer groups = faster build: put every file that does not import another project file into the same group (up to 4 files per group) and fix their names in the contract. "
+    "5) Include every manifest/dependency file the project needs to start (requirements.txt, package.json with \"type\":\"module\" for ES modules, build files, wrangler.toml, Procfile ...). "
+    "6) commands: exact shell commands. setup = install, run = start, deploy = a FREE hosting that works today (keys and tokens as environment variables), "
+    "test = real checks that run offline (python -m py_compile f.py, node --check f.js, pytest, node test.mjs). When the project has runnable logic, add one small smoke-test file (test_smoke.py or test.mjs) to the LAST group: it imports the real project files, runs the main flow offline with fake data, prints PASS and exits non-zero on failure; list its command under test, and the file must be in files. "
+    "7) env: every secret/environment variable and where to get it. "
+    "8) spec: 6-10 lines, each 'WHEN <user action or input> THEN <visible result>', checkable by reading or running. Cover the main user journey, empty or invalid input, and one error case. Reviewers use these lines as the definition of done. "
     "Strings short and plain; identifiers in English; purpose may be Hinglish.")
 
 
@@ -8225,9 +8233,9 @@ def make_blueprint(task):
                 (PIPE_ST.get("task") or task)[:4000], existing_block(), PIPE_STEP_LINES))
     sysmsg = PLAN_SYS_PIPE.replace("MAXL", str(PIPE_STEP_LINES)) + (PLAN_EXISTING_RULES if project_has_files() else "")
     def _finish(bp, d):
-        dz = clip(str((d or {}).get("design") or "").strip(), 900)
+        dz = clip(str((d or {}).get("design") or "").strip(), 2500)
         if dz:
-            bp["notes"] = clip("DESIGN: " + dz + "\n" + (bp.get("notes") or ""), 1900)
+            bp["notes"] = clip("DESIGN: " + dz + "\n" + (bp.get("notes") or ""), 3800)
         return bp
     for nm, md in plan_slots():
         if STATE["cancel"]:
@@ -8269,7 +8277,7 @@ WRITE_SYS = (
     "You write ONE source file of a multi-file project exactly as the PLAN/CONTRACT says. Other files are written by other writers at the same time, so use ONLY the names, "
     "signatures, routes, ids, keys and environment variables that the CONTRACT gives (and the real code/cards of ALREADY WRITTEN files, which are the truth). Use exactly the names the contract gives; "
     "when the contract has no name for something, pick the simplest name and move on, and import only names the contract lists. Write the COMPLETE, working file: no placeholders, no 'rest of the code', no TODO stubs, "
-    "real error handling for empty/invalid input. At most MAXL lines. Reply with ONLY the file content inside ONE fenced code block, nothing before or after it.")
+    "real error handling for empty/invalid input, and handle empty, loading and error states so the result feels finished to a real user. At most MAXL lines. Reply with ONLY the file content inside ONE fenced code block, nothing before or after it.")
 CONT_SYS = (
     "A source file was cut off at the output limit. You get the last lines written so far. Continue EXACTLY with the next line and finish the file. "
     "Do not repeat any line already written. Reply with ONLY the remaining lines inside ONE fenced code block.")
@@ -8318,7 +8326,7 @@ def write_user(bp, f):
     return "\n\n".join(x for x in [
         "TASK (user ka kaam):\n" + (PIPE_ST.get("task") or "")[:3000],
         "PROJECT: %s\nSTACK: %s\nSHARED RULES: %s\nENV VARIABLES: %s" % (bp["summary"], bp["stack"], bp["notes"] or "-", " ; ".join(bp["env"]) or "-"),
-        "CONTRACT (saari files):\n" + contract_text(bp, 9000),
+        "CONTRACT (saari files):\n" + contract_text(bp, 24000),
         ("ALREADY WRITTEN - jin files se ye file kuch import karti hai:\n" + "\n\n".join(real)) if real else "",
         ("CARDS of written files (real names + line numbers):\n" + cards) if cards else "",
         "YOUR FILE: %s\nPURPOSE: %s\nMUST EXPORT: %s\nMAY IMPORT: %s\nLIMIT: at most %d lines." % (
@@ -8441,7 +8449,7 @@ def fix_file(rel, bugs, extra=""):
     nlines = old.count("\n") + 1
     bp = PIPE_ST.get("bp")
     head = "%sCARDS (real names of other files):\n%s\n\n%sBUGS TO FIX in %s:\n%s\n\n" % (
-        ("PLAN/CONTRACT:\n%s\n\n" % contract_text(bp, 5000)) if bp else "", memory_text(3500) or "-", (extra + "\n\n") if extra else "",
+        ("PLAN/CONTRACT:\n%s\n\n" % contract_text(bp, 12000)) if bp else "", memory_text(3500) or "-", (extra + "\n\n") if extra else "",
         rel, bug_lines(bugs))
     # Badi file ko poora prompt me daalne se HAIKU/backup models ctx limit ke kaaran skip ho jaate the.
     # Edit blocks ke liye sirf bug lines ke aas-paas ke exact numbered excerpts kaafi hain.
@@ -8743,7 +8751,7 @@ FINAL_SYS_PIPE = (
     "You are the final reviewer of a finished multi-file project. You get the TASK, the PLAN/CONTRACT, a MEMORY MAP and ALL source files with line numbers. "
     "Read everything like a developer doing a last test run in his head: follow the real flow from start-up through each feature, and check that the setup/run "
     "commands would work with these files. Report ONLY real defects: syntax errors, crashes, wrong imports/names/signatures/routes/ids between files, missing files "
-    "or dependencies (requirements/package files), config that makes it fail to start or deploy, and logic that clearly does not do what the TASK asks. "
+    "or dependencies (requirements/package files), config that makes it fail to start or deploy, logic that clearly does not do what the TASK asks, and a SPEC line (WHEN ... THEN ...) that the code clearly does not satisfy. "
     "Do NOT report style, suggestions, extra features, hardening, or a difference between a name written in the notes/task and the real file or folder name. "
     "Do not repeat something listed under ALREADY REPORTED unless it is STILL really present in the code below. Give the exact line from the numbered listing. "
     'Reply with ONLY a JSON array, no prose, no code fence: [{"file":"path","line":N,"bug":"what is wrong","fix":"exact change"}]. '
@@ -8774,7 +8782,7 @@ def final_payload(nm, rnd):
     budget = max(30000, budget)
     seen = PIPE_ST.setdefault("reviewed", {})
     head = ["TASK:\n" + (PIPE_ST.get("task") or "")[:3000], "PLAN / CONTRACT:\nProject: %s | Stack: %s | Niyam: %s\n%s" % (
-        bp["summary"], bp["stack"], bp["notes"] or "-", contract_text(bp, 9000)),
+        bp["summary"], bp["stack"], bp["notes"] or "-", contract_text(bp, 24000)),
         "COMMANDS: " + " || ".join("%s: %s" % (k, " ; ".join(v)) for k, v in bp["commands"].items() if v)]
     mem = memory_text(6000)
     if mem:
@@ -8836,9 +8844,30 @@ def salvage_array(text):
     return out or None
 
 
+FINAL_DEFAULT = ("gpt-5.4-mini", "gem-flash-3.7", "gpt-5.6-luna")
+
+
+def final_slots():
+    """[(provider, model)] aakhri jaanch ke liye (planner se alag pehle). FINAL_MODEL env: 'JAAT:gpt-5.4-mini,JAAT:gem-flash-3.7'."""
+    out = []
+
+    def add(nm, m):
+        cfg = APIS.get(nm) or {}
+        if (nm, m) not in out and m in (cfg.get("models") or ()) and m not in (cfg.get("off_models") or ()):
+            out.append((nm, m))
+    for w in [x.strip() for x in _env("FINAL_MODEL", "").split(",") if x.strip()]:
+        if ":" in w:
+            n1, m1 = w.split(":", 1)
+            add(n1.strip(), m1.strip())
+    if not out:
+        for m in FINAL_DEFAULT:
+            add("JAAT", m)
+    return out[:4]
+
+
 def final_review(rnd):
     """([bug], provider) ya (None, ''). DSX; band/fail ho to Gemini, phir JAAT."""
-    for nm in rot_prefs(FINAL_PREF):
+    for nm, md in final_slots() + [(x, None) for x in rot_prefs(FINAL_PREF)]:
         if STATE["cancel"]:
             break
         if not avail((nm,)):
@@ -8848,7 +8877,7 @@ def final_review(rnd):
             if nm == "DSX":
                 PIPE_ST["dsx_calls"] = PIPE_ST.get("dsx_calls", 0) + 1
             u = user if not t else user + "\n\n[Pichhla jawab sahi JSON nahi tha. Sirf JSON array do, max 6 bug, har ek chhota.]"
-            res = gen_call(nm, FINAL_SYS_PIPE, u, mt=PIPE_OUT)
+            res = gen_call(nm, FINAL_SYS_PIPE, u, mt=PIPE_OUT, model=md, tmo=(PLAN_TMO if md else None))
             if not res:
                 break
             pj = parse_json_reply(res[0])
@@ -8973,7 +9002,7 @@ def run_tests():
 
 def final_phase():
     bp = PIPE_ST["bp"]
-    if not (avail(FINAL_PREF)):
+    if not (avail(FINAL_PREF) or avail(("JAAT",))):
         PIPE_ST.setdefault("warn", []).append("aakhri jaanch ke liye koi AI (DSX/Gemini/JAAT) nahi mila")
         ev("note", text="⚠ aakhri jaanch ke liye koi AI nahi mila, ise chhod ke aage badh raha hoon")
         PIPE_ST["phase"] = "end"
@@ -9126,6 +9155,50 @@ def pipe_run():
         pipe_save()
 
 
+PLAN_APPROVE = _env("PLAN_APPROVE", "1") != "0"                     # 0 = plan ke baad haan/badlo wala step band
+OK_ANS_RE = re.compile(r"^\W*(?:haan|han|ha|yes|ok(?:ay)?|theek|thik|sahi|chalo|shuru|start|go|banao|bana\s*do|kar\s*do|done)\b", re.I)
+
+
+def approve_plan(task, bp, who):
+    """Naya project: plan ke baad user ko chhota summary + 'poora kab' (spec) dikhao; Haan = files likho, Badlo = badlav likhke plan dobara (ek baar).
+    Jawab na aaye (3 AI faisla) ya ASK_USER=0 ho to seedha aage. Purane project me ye step nahi."""
+    if not PLAN_APPROVE or project_has_files():
+        return bp, who
+    for _r in range(2):
+        try:
+            spec = [clip(str(x), 110) for x in (bp.get("spec") or [])[:6]]
+            ev("note", text="📋 Plan: %s | %s | %d file\nPoora kab:\n%s" % (clip(bp.get("summary") or "", 160), clip(bp.get("stack") or "", 80), len(bp["files"]),
+                                                                       "\n".join("• " + x for x in spec)))
+            ans, how = ask_user("Ye plan theek hai? Haan to files likhna shuru karun, nahi to Badlo.", ["Haan, banao", "Badlo"], ctx="Plan: " + clip(bp.get("summary") or "", 300))
+            if how == "stop" or STATE["cancel"]:
+                return bp, who
+            if how != "user" or OK_ANS_RE.match(ans or ""):
+                break
+            if _r:                                           # badlav ke baad doosri baar bhi Badlo: aur nahi poochhenge
+                ev("note", text="theek hai, ab isi plan se aage badhta hoon")
+                break
+            ch = ans
+            if re.match(r"^\W*badlo\W*$", ans or "", re.I):
+                ch, h2 = ask_user("Kya badlun? Likh do.", [], ctx="Plan: " + clip(bp.get("summary") or "", 300))
+                if h2 == "stop" or STATE["cancel"]:
+                    return bp, who
+                if h2 != "user" or not (ch or "").strip():
+                    break
+            new_task = (PIPE_ST.get("task") or task) + "\n[USER KA PLAN BADLAV: %s]" % clip(ch, 500)
+            PIPE_ST["task"] = new_task
+            STATE["task"] = new_task
+            ev("note", text="🔁 badlav ke saath plan dobara bana raha hoon...")
+            bp2, who2 = make_blueprint(new_task)
+            if bp2:
+                bp, who = bp2, who2
+                continue
+            break
+        except Exception as e:
+            log("approve_plan galti: %s" % e)
+            break
+    return bp, who
+
+
 def pipeline_entry(task):
     """None = pipeline nahi chali (purana raasta). Warna '' ya samajh-text (STATE['pipe_summary'] me aakhri saar)."""
     PIPE_ST.clear()
@@ -9137,6 +9210,10 @@ def pipeline_entry(task):
     if not bp:
         ev("note", text="⚠ plan nahi ban paya (DSX/Gemini/JAAT), purane raaste se kaam kar raha hoon")
         return None
+    bp, who = approve_plan(task, bp, who)
+    if STATE["cancel"]:
+        return ""
+    task = PIPE_ST.get("task") or task
     PIPE_ST.update(bp=bp, phase="build", planner=who)
     STATE["goal"] = bp["summary"] or task[:200]
     STATE["criteria"] = ["D%d: %s" % (i + 1, s) for i, s in enumerate(bp["spec"][:6])]
@@ -9691,17 +9768,23 @@ def app_name_for(task):
 
 ASK_MAX = max(1, min(10, int(_env("ASK_MAX", "10") or 10)))         # Gemini max kitne sawal poochh sakta hai (1-10)
 QGEN_SYS = (
-    "You are the first helper (Gemini) of a NON-TECHNICAL user who wants software built by an AI team (DSX = architect who plans, JAAT = coder). "
-    "READ THE USER MESSAGE CAREFULLY (it may be Hinglish with spelling mistakes). Before building starts, ask ONLY the questions whose answer is truly missing and would change what gets built. "
-    "Never ask what the message already says or implies. Ask 0 questions if the message is already clear enough, otherwise 1 to " + str(ASK_MAX) + " (more only for big, vague ideas). "
-    "Good topics: where it runs (phone app / web page / terminal-bot), main features, who uses it, language of the content, look/colours, save/share/login needs, limits (free only, offline). "
-    "Each question: short, very simple Hinglish, no jargon, 2-4 short options, last option always 'Tum chuno'. "
-    "Reply ONLY JSON, no prose: " + '{"questions":[{"q":"...","options":["...","...","Tum chuno"],"key":"platform|language|size|other"}]}' + " "
-    "Use key 'platform' ONLY for the where-does-it-run question, 'language' for programming language.")
+    "You are the intake helper of a NON-TECHNICAL user who wants software built by an AI team. The message may be Hinglish with spelling mistakes. "
+    "Your job: make sure the team knows WHAT to build before planning starts, asking as little as possible.\n"
+    "Step 1. Is the CORE IDEA clear? Clear = you can say what problem the software solves and the 3 main things the user does in it. "
+    "'Eal app desine kro' or 'ek fitness app banao' is NOT clear. 'dukaan ka udhaar khata app: customer list, udhaar likhna, paisa wapas lena' IS clear. "
+    "If an ANSWERS SO FAR block is given, read it together with the message.\n"
+    "Step 2. If NOT clear: ask exactly ONE question, an open one (options: []), in very simple Hinglish, asking what it should do, with a tiny example from the user's topic. Use key 'idea'. Ask nothing else this round; the next round gets the answer.\n"
+    "Step 3. If clear: ask 0 to 4 questions, only about things that would change what gets built, the most important first. "
+    "Every question and its options must come from THIS idea (for a fitness app ask about workouts, not about generic 'Social/Education'). "
+    "Skip whatever the message or answers already say or imply. Where it runs, language, look, login, saving data and offline come last, and only if still unknown and they matter.\n"
+    "Each question: short simple Hinglish, 2-4 short options, last option always 'Tum chuno'. Key 'platform' only for where it runs, 'language' only for the programming language, otherwise 'other'.\n"
+    "'assumptions': up to 5 short English lines for what you will assume where nothing was asked.\n"
+    'Reply ONLY JSON, no prose: {"idea_clear":true,"questions":[{"q":"...","options":["...","...","Tum chuno"],"key":"idea|platform|language|size|other"}],"assumptions":["..."]}')
 SPEC_SYS = (
-    "You are Gemini, first helper of a NON-TECHNICAL user. Read the USER MESSAGE and the Q&A and write the requirement for DSX (the architect who will plan the files). "
-    "Reply ONLY JSON: " + '{"platform":"android|web|cli|bot|other|unknown","spec":"one clear English paragraph: what to build, platform, EVERY feature named or implied, answers given, and for each \'Tum chuno\' answer say DSX decides the simplest free option"}' + ". "
-    "Do not invent features the user did not ask for. No code.")
+    "You are the intake helper of a NON-TECHNICAL user. Read the USER MESSAGE and the Q&A and write the requirement for the architect who plans the files. "
+    'Reply ONLY JSON: {"platform":"android|web|cli|bot|other|unknown","spec":"one clear English paragraph (under 1400 characters): what to build and for whom, the platform, '
+    "the main user journey, EVERY feature named or implied, the answers given, and a last sentence 'Assumptions: ...' listing what you assumed; for each 'Tum chuno' answer the architect picks the simplest free option\"}. "
+    "Stay with what the user wants: no unrelated products or features. The usual supporting parts a real app of this kind needs (empty states, error messages, a settings or about screen) are fine. No code.")
 
 
 def default_questions_start(task):
@@ -9713,15 +9796,21 @@ def default_questions_start(task):
     return qs[:3]
 
 
-def build_questions(task):
-    """Gemini (fast) message dhyaan se padh ke 0-10 sawal banata hai (sirf jo sach me adhura ho). Gemini na chale to purane 2 sawal."""
+def build_questions(task, answers=None):
+    """(sawal, idea_clear, assumptions). Gemini message padhta hai: idea saaf nahi to sirf EK khula sawal (idea_clear=False),
+    saaf ho to idea ke hisaab ke 0-4 sawal. answers di ho to 'ANSWERS SO FAR' ke saath dobara. Gemini na chale to purane 2 sawal."""
     try:
         ev("note", text="🧠 Gemini aapka message padh raha hai, zaroori sawal soch raha hai...", _log=False)
-        txt, nm = small_gen(QGEN_SYS, "USER MESSAGE:\n" + clip(task, 2500), 1400, TRIAGE_PREF, fast=True)
+        user = "USER MESSAGE:\n" + clip(task, 2500)
+        if answers:
+            user += "\n\nANSWERS SO FAR:\n" + clip("\n".join(answers), 1500)
+        txt, nm = small_gen(QGEN_SYS, user, 1400, TRIAGE_PREF, fast=True)
         d = parse_json_reply(txt) if txt else None
         items = d.get("questions") if isinstance(d, dict) else (d if isinstance(d, list) else None)
         if items is None:
-            return default_questions_start(task)
+            return default_questions_start(task), True, []
+        clear = not (isinstance(d, dict) and d.get("idea_clear") is False)
+        assum = [clip(str(x).strip(), 160) for x in ((d.get("assumptions") if isinstance(d, dict) else None) or []) if str(x).strip()][:5]
         qs = []
         for it in items:
             if not isinstance(it, dict) or not str(it.get("q") or "").strip():
@@ -9730,16 +9819,20 @@ def build_questions(task):
             if opts and not any(re.search(r"tum\s*chuno", o, re.I) for o in opts):
                 opts = opts[:3] + ["Tum chuno"]
             qs.append({"q": clip(str(it["q"]).strip(), 220), "options": opts, "key": str(it.get("key") or "other").strip().lower()})
-        return qs[:ASK_MAX]
+        if not clear:
+            qs = [dict(qs[0], options=[], key="idea")] if qs else [{"q": "App kya kaam karegi? 2-3 kaam batao (jaise: dukaan ka udhaar likhna, customer list).", "options": [], "key": "idea"}]
+        return qs[:ASK_MAX], clear, assum
     except Exception as e:
         log("build_questions galti: %s" % e)
-        return default_questions_start(task)
+        return default_questions_start(task), True, []
 
 
-def gem_spec(task, answers):
+def gem_spec(task, answers, assumptions=None):
     """Gemini: message + jawab se DSX ke liye saaf requirement. '' = nahi bana."""
     try:
         user = "USER MESSAGE:\n%s\n\nQ&A:\n%s" % (clip(task, 2500), "\n".join(answers) or "-")
+        if assumptions:
+            user += "\n\nINTAKE ASSUMPTIONS:\n" + "\n".join("- " + x for x in assumptions)
         txt, nm = small_gen(SPEC_SYS, user, 1200, TRIAGE_PREF, fast=True)
         d = parse_json_reply(txt) if txt else None
         if isinstance(d, dict):
@@ -9758,7 +9851,19 @@ def wants_questions(task):
 def ask_first(task):
     """(task + jawab + Gemini spec, platform, stop?). platform = 'android' | ''."""
     answers, plat = [], ("android" if (ANDROID_TASK_RE.search(task) or PHONE_RE.search(task)) else "")
-    for q in build_questions(task):
+    qs, clear, assum = build_questions(task)
+    for _r in range(2):                                     # idea saaf nahi: ek khula sawal, jawab ke saath prompt dobara
+        if clear:
+            break
+        iq = qs[0] if qs else {"q": "App kya kaam karegi?", "options": []}
+        ans, how = ask_user(iq["q"], [], ctx="Task: " + task[:500])
+        if how == "stop":
+            return task, plat, True
+        answers.append("%s -> %s" % (iq["q"], ans))
+        qs, clear, assum = build_questions(task, answers)
+    if not clear:
+        qs = []                                             # 2 round ke baad bhi dhundhla: jo mila usi se aage, baaki assumptions me
+    for q in qs:
         ans, how = ask_user(q["q"], q["options"], ctx="Task: " + task[:500])
         if how == "stop":
             return task, plat, True
@@ -9770,7 +9875,7 @@ def ask_first(task):
                 if h2 == "stop":
                     return task, plat, True
                 answers.append("Kaunsi language me banau? -> %s" % a2)
-    gp, spec = gem_spec(task, answers)                      # Gemini ki saaf requirement DSX tak
+    gp, spec = gem_spec(task, answers, assum)               # Gemini ki saaf requirement DSX tak
     if not plat and gp == "android":
         plat = "android"
     out = task + ("\n[User ke jawab: %s]" % " | ".join(answers) if answers else "\n[User ke jawab: (koi sawal nahi poochha, message saaf tha)]")
