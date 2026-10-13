@@ -27,6 +27,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import hashlib, hmac
 
+print("BUILD-MARK 1428 (REV2 fix) - agar ye line log me dikhe to naya code chal raha hai", flush=True)
+
 
 def _env(name, default=""):
     return (os.environ.get(name) or default).strip()
