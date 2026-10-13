@@ -10057,6 +10057,41 @@ def _rev9_watch():
             log("rev9_watch: %s" % e)
 
 
+
+# ---------- JAAT ke saare model (63) khud laao ----------
+# jaat-api ka /v1/models saare model deta hai (jaat-default + duck + free). Pehle yahan sirf "jaat-default" likha tha,
+# isliye panel me ek hi dikhta tha. Ab start par aur har 10 min me list khud sync hoti hai. jaat-default hamesha pehle
+# (wahi main), baaki fallback ki tarah peeche. Band karna ho to environment me JAAT_SYNC=0.
+def jaat_sync_models():
+    cfg = APIS.get("JAAT")
+    if not cfg or not str(cfg.get("key") or "").strip():
+        return 0
+    try:
+        req = urllib.request.Request(cfg["base"].rstrip("/") + "/models",
+                                     headers={"Authorization": "Bearer " + str(cfg["key"]), "User-Agent": "mumbai"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        ids = [m.get("id") for m in (data.get("data") or []) if isinstance(m, dict) and m.get("id")]
+    except Exception as e:
+        ev("note", text="JAAT model list nahi mili: %s" % str(e)[:100])
+        return 0
+    if not ids:
+        return 0
+    new = ["jaat-default"] + [m for m in dict.fromkeys(ids) if m != "jaat-default"]
+    if new != cfg.get("models"):
+        cfg["models"] = new
+        ev("note", text="JAAT: %d model sync ho gaye" % len(new))
+    return len(new)
+
+
+def _jaat_sync_loop():
+    while True:
+        try:
+            jaat_sync_models()
+        except Exception:
+            pass
+        time.sleep(600)
+
 if __name__ == "__main__":
     if "--setup" in sys.argv:
         setup()
@@ -10068,6 +10103,8 @@ if __name__ == "__main__":
             last_proj = "main"
         set_project(last_proj)
         reload_conf()
+        if _env("JAAT_SYNC", "1") != "0":
+            threading.Thread(target=_jaat_sync_loop, daemon=True).start()
         replay(load_state())
         if REV2_PROBE and any(ready(n) for n in REV2):
             print("rev9 AI jaanch raha hoon (chat se pehle)...")
