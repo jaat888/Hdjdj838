@@ -138,34 +138,6 @@ for _n, _tok in (("JAAT", 10400),):   # JAAT ~10,600 token par kat jata hai
         APIS[_n].setdefault("vision", APIS[_n]["models"][0])                     # image dekhne ke liye wahi model
 VISION_PREF = ("JAAT", "NV2")                               # image: pehle JAAT (gateway ke peeche jo bhi vision model ho), phir NV2
 
-# ---- KAUN SA KAAM KAUN KAREGA (JAAT gateway ke andar ke model, kaam ke hisaab se) ----
-# Har naam ek "role provider" hai: wahi gateway/key, par model list us kaam ke hisaab se. LIST ME PEHLA MODEL = MAIN,
-# baaki tab chalte hain jab pehla fail ho. Yahin badal sakte ho; ⚙ AI providers panel me har role ke model ON/OFF bhi hote hain.
-# Duck AI ke models (gateway me): claude-haiku-4-5, gpt-5.6-luna, gpt-5.4-mini, mistral-small-2603, tinfoil/gpt-oss-120b, tinfoil/gemma4-31b, duck-auto
-#   JCODE  code likhna/theek karna (JAAT ke baad backup)   JPLAN  plan/architect/aakhri audit (bada reasoning model)
-#   JREV   code jaanch/scan (likhne wale se alag model)    JCHAT  baat-cheet/explain/study ka backup (GROQ/NV2 limit me aaye to)
-# Image dekhna (vision) abhi bhi JAAT se hi hota hai.
-ROLE_MODELS = {
-    # code likhna/theek karna: Haiku, phir code wale (kimi-code, composer, grok-build, cohere code, poolside), phir bade general
-    "JCODE": (["claude-haiku-4-5", "rev-haiku", "rev-kimi", "rev-composer-2.5", "rev-grok-build", "rev-dspro", "kilo-cohere", "br-cohere",
-               "kilo-poolside", "br-poolside", "ovh-qwen397", "gem-flash-3.7", "rev-dsf41", "rev-grok-composer"], "strong"),
-    # plan / architect / aakhri audit: sabse bade reasoning model
-    "JPLAN": (["gpt-5.6-luna", "rev-luna", "rev-dspro", "rev-grok-4.7", "kilo-ultra", "br-ultra", "ovh-qwen397", "tinfoil/gpt-oss-120b",
-               "ovh-oss120", "chat-oss120", "kilo-super", "rev-grok-4.6", "rev-kimi", "kilo-stepfun"], "strong"),
-    # jaanch/scan: likhne wale se alag model (grok, deepseek-flash, mistral, gemini, mimo, qwen, nemotron)
-    "JREV": (["gpt-5.4-mini", "rev-grok-4.6", "rev-grok-4.5-latest", "rev-grok-latest", "rev-grok-4.5", "rev-dsf41", "rev-dsf4",
-              "tinfoil/gpt-oss-120b", "mistral-small-2603", "ovh-mistral-s", "gem2-flash-3.6", "gem2-flash-3.5", "rev-mimo26", "rev-mimo25",
-              "br-nano-omni", "ovh-qwen27", "unturf-qwen", "unturf-hermes", "vlm-qwen27b"], "strong"),
-    # chat/explain/study ka backup: tez wale pehle, chhote/limit wale (ds-flash, deepai, uai, lfm, qwen0.8b) sabse last
-    "JCHAT": (["claude-haiku-4-5", "rev-haiku", "gpt-5.4-mini", "gem2-flash-3.6", "tinfoil/gemma4-31b", "chat-llama70", "ovh-llama70", "chat-gpt4o",
-               "kilo-auto", "kilo-router", "kilo-lightning", "br-lightning", "rev-grok", "rev-grok-composer-fast", "kilo-dots", "br-glimmer",
-               "vireonix", "duck-auto", "br-llama-vision", "vlm-diffgemma", "ds-flash", "dai-standard", "uai-reasoning", "kilo-lfm", "vlm-qwen08b"], "cheap"),
-}
-for _r, (_ms, _t) in ROLE_MODELS.items():
-    APIS[_r] = dict(APIS["JAAT"], models=list(_ms), tier=_t, group=_r.lower())
-    APIS[_r].pop("vision", None)
-    PRIORITY.append(_r)
-
 DEFAULT_APIS = copy.deepcopy(APIS)
 DEFAULT_PRIORITY = list(PRIORITY)
 
@@ -725,6 +697,8 @@ def conf_apply(text, write=False):
         raise ValueError("sabse upar {} object chahiye")
     newp = {}
     for name, c in (d.get("providers") or {}).items():
+        if name in ("JCODE", "JPLAN", "JREV", "JCHAT"):      # purane role providers (hata diye), saved config me ho to bhi ignore
+            continue
         if not isinstance(c, dict) or not re.fullmatch(r"\w{1,20}", str(name)):
             raise ValueError("provider '%s' galat" % name)
         base, c = dict(APIS.get(name, {})), dict(c)
@@ -5954,7 +5928,7 @@ function drawPlan(){if(!planBox)return;var done=planBox.items.filter(function(x)
 function toggleMenu(ev){ev.stopPropagation();var m=document.getElementById('menu');m.style.display=m.style.display=='block'?'none':'block'}
 function mnu(a){document.getElementById('menu').style.display='none';if(a=='conf')openConf();else if(a=='files')openFiles();else actPost(a)}
 document.addEventListener('click',function(){var m=document.getElementById('menu');if(m)m.style.display='none'});
-var NOISE=/(HTTP\s?\d{3}|\b429\b|rate.?limit|bheed|aaram|ruk ke dobara|org_\w+|cooldown)/i,PROV=/^(JAAT|JCODE|JPLAN|JREV|JCHAT|GROQ|NV2|DSX)\b/;
+var NOISE=/(HTTP\s?\d{3}|\b429\b|rate.?limit|bheed|aaram|ruk ke dobara|org_\w+|cooldown)/i,PROV=/^(JAAT|GROQ|NV2|DSX)\b/;
 var act=null,actBody=null,actN=0,lastAi=null,doneShown=false,stopping=false,curLevel=0,curPlan=[0,0];
 function actBox(){if(!act){act=el('details','step act');act.appendChild(el('summary',null,'Kaam chal raha hai'));actBody=el('div','actb');act.appendChild(actBody);actN=0;chat.appendChild(act)}return actBody}
 function actSay(t){if(!act)return;actN++;act.firstChild.textContent=t+(actN>1?'  \u00b7  '+actN+' kadam':'')}
@@ -10148,34 +10122,7 @@ def jaat_sync_models():
     if new != cfg.get("models"):
         cfg["models"] = new
         ev("note", text="JAAT: %d model sync ho gaye" % len(new))
-    have = set(new)
-    for r, (ms, _t) in ROLE_MODELS.items():            # role provider: wahi base/key, model sirf jo gateway me hain (koi na mile to jaat-default)
-        if r in APIS:
-            APIS[r]["base"], APIS[r]["key"] = cfg["base"], cfg["key"]
-            APIS[r]["models"] = [m for m in ms if m in have] or ["jaat-default"]
     return len(new)
-
-
-def _with(prefs, add, at=0):
-    out = [x for x in prefs if x not in add]
-    out[at:at] = list(add)
-    return tuple(out)
-
-
-# Kaun sa kaam kisko jaata hai (upar ROLE_MODELS dekho). GROQ/NV2/DSX wahi hain, role provider unke saath jude hain.
-PLAN_PREF = _with(PLAN_PREF, ["JPLAN"])                    # plan: bada reasoning model pehle
-PLANNER_PREF = _with(PLANNER_PREF, ["JPLAN"])
-MERGER_PREF = _with(MERGER_PREF, ["JPLAN"], 99)            # plan merge: DSX pehle, JPLAN backup
-CODE_PLAN_PREF = _with(CODE_PLAN_PREF, ["JPLAN"])
-FINAL_PREF = _with(FINAL_PREF, ["JPLAN"], 1)               # aakhri audit: (index 0 skip hota hai) JPLAN, NV2, DSX
-WRITE_PREF = _with(WRITE_PREF, ["JCODE"], 1)               # likhna: JAAT pehle, phir JCODE (kimi code / deepseek pro), phir baaki
-FIX_PREF = _with(FIX_PREF, ["JCODE"], 1)
-CODE_WRITE_PREF = _with(CODE_WRITE_PREF, ["JCODE"], 1)
-CHECK_PREF = _with(CHECK_PREF, ["JREV"])                   # jaanch: likhne wale se alag model pehle
-SCAN_PREF = _with(SCAN_PREF, ["JREV"])
-for _nm in ("CHAT_PREF", "STUDY_PREF", "TRIAGE_PREF", "EXPLAIN_PREF", "EXAM_PREF"):   # halka kaam: GROQ/NV2 tez hain, limit lage to JCHAT
-    globals()[_nm] = _with(globals()[_nm], ["JCHAT"], 99)
-QA_PREF = _with(QA_PREF, ["JCHAT"], 99)
 
 
 def _jaat_sync_loop():
