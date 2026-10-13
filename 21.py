@@ -9915,6 +9915,10 @@ def run_agent(task):
 
 
 # ================= rev9 jaanch: chat se pehle test, kharab ko hatao, dusra lagao =================
+# REV2 pehle GROK/DSPRO/KIMI/LUNA ki list thi (multi-model providers jinke liye probe banaya gaya tha).
+# Ab wo sab providers hi nahi hain (JAAT gateway ke peeche chale gaye), isliye REV2 khali: ye poora
+# probe/watch mechanism khud hi off ho jata hai (kuch jaanchne ko nahi bachta), error nahi deta.
+REV2 = ()
 REV2_PROBE = _env("REV2_PROBE", "1") != "0"
 REV2_EVERY = int(_env("REV2_PROBE_EVERY", "600"))      # itne second baad kharab/aaram wale dobara jaanchte hain
 REV2_STATE = {}                                         # naam -> {"ok": bool, "model": str, "ms": int, "err": str, "at": time}
