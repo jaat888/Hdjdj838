@@ -2,8 +2,10 @@
 """Mumbai 5.8 (21.py) - blitz.cloud (Docker) par chalne wala coding agent. Sirf Python stdlib.
 
 Environment variables (blitz me daalo):
-  JAAT_KEY  GEM_KEY  DS_KEY  GROQ_KEY  NV2_KEY  DAI_KEY     AI ki keys (jo key nahi di wo AI band rahega)
-  UAI_KEY           (optional) UAI (unlimitedai.chat) bina login chalta hai, key ki zaroorat nahi; UAI_URL se link badal sakte ho
+  JAAT_KEY  GROQ_KEY  NV2_KEY  DSX_KEY     AI ki keys (jo key nahi di wo AI band rahega)
+                    JAAT_KEY = jaat-api gateway ki ek hi key; GEM/GEM2/GEM3/DS/LUNA/DSPRO/GROK/KIMI/
+                    MIMO26/MIMO25/DSF41/DSF4/DAI/UAI/HAIKU sab ab isi gateway (jaat-api-main worker) ke
+                    peeche hain (63+ free model + duck chain), yahan alag se defines nahi hain.
   NTFY_TOPIC        (optional) ntfy app ka topic, ya TG_TOKEN + TG_CHAT (Telegram): kaam khatam hone par phone par message
   BRAVE_KEY         (optional) @@SEARCH ke liye Brave Search; na do to DuckDuckGo se chalta hai
   MUMBAI_PASSWORD   (optional) login password, na do to 8888
@@ -13,7 +15,6 @@ Environment variables (blitz me daalo):
   ALLOWED_HOSTS     (optional) sirf ye domain maane, comma se alag
   MCP_GATEWAY_URL   (optional) mcp-gateway ka link (jaise https://mcp-gateway.xxx.blitz.cloud) => @@MCP tools chalu
   MCP_API_KEY       (optional) gateway par API_KEY lagi ho to wahi key
-  HAIKU_CTX         (optional) Haiku ke liye prompt/file context budget (characters), default 100000
 
 Login: 50 galat try par 1 din ke liye lock. /health bina password ke 'ok' deta hai (uptime bot ke liye).
 Termux par bhi chalta hai:  python 21.py  ->  http://127.0.0.1:8011"""
@@ -38,7 +39,7 @@ def _env(name, default=""):
 #   min_gap    is provider par do request ke beech kam se kam itne second
 #   rate_cool  429/limit aane par itne second aaram (Gemini ka lock ~2 ghante => 7200)
 #   retry_429  429 aane par usi provider ko itni baar (ruk ke) dobara try karo, phir hi cooldown (default 1)
-PRIORITY = ["JAAT", "GEM", "GEM2", "GEM3", "DS", "GROQ", "NV2", "LUNA", "DSPRO", "GROK", "KIMI", "MIMO26", "MIMO25", "DSF41", "DSF4", "DAI", "UAI", "HAIKU", "DSX"]
+PRIORITY = ["JAAT", "GROQ", "NV2", "DSX"]   # ab bas 4: JAAT (jaat-api gateway, 63+ model usi ke peeche), GROQ, NV2, DSX. Baaki sab JAAT ke andar chale jaate hain.
 DISABLED = set()            # DSX wapas aa gaya: chalu (⚙ AI panel se chahe to band karo)
 APIS = {
     "JAAT": {                      # JAAT (main, sabse zyada yahi chalega). Ek time par 1 request; 429 par 2 baar retry, cooldown bahut kam
@@ -71,49 +72,6 @@ APIS = {
         "max_ctx": int(_env("DSX_CTX", "1500000")),   # DSX ka context 1M token (~3M char) hai: itna bada project ek baar me padh leta hai (~1.5M char = ~400-500k token, margin ke saath; 413 aaye to khud chhota seekh leta hai)
         "max_tokens": int(_env("DSX_MAX_TOKENS", "64000")),   # DSX ka max output 384K hai; hum 64k tak maangte hain. Server 400 de to ask_oai error se asli hadd padh ke seekh leta hai (LEARN_MT)
     },
-    "GEM": {                       # Gemini #1 (secondary)
-        "type": "oai",
-        "base": "https://gimmni.blitz.cloud/v1",
-        "key": _env("GEM_KEY", "sk-gemini"),
-        "models": ["gemini-3.7-flash"],
-        "timeout": 180,
-        "total_timeout": 400,
-        "group": "gemini",
-        "max_conc": 1,
-        "min_gap": 10,
-        "rate_cool": 7200,
-    },
-    "GEM2": {                      # Gemini #2 (workers.dev)
-        "type": "oai",
-        "base": "https://gemini.jaatbahi76.workers.dev/v1",
-        "key": _env("GEM2_KEY", "sk-gemini"),
-        "models": ["gemini-3.6-flash@think=0", "gemini-3.5-flash"],
-        "timeout": 180,
-        "total_timeout": 400,
-        "group": "gemini",
-        "max_conc": 1,
-        "min_gap": 10,
-        "rate_cool": 7200,
-    },
-    "GEM3": {                      # Gemini #3 (seedha IP, http)
-        "type": "oai",
-        "base": "http://129.225.83.244:8081/v1",
-        "key": _env("GEM3_KEY", "sk-gemini"),
-        "models": ["gemini-3.7-flash", "gemini-3.6-flash"],
-        "timeout": 180,
-        "total_timeout": 400,
-        "group": "gemini",
-        "max_conc": 1,
-        "min_gap": 10,
-        "rate_cool": 7200,
-    },
-    "DS": {
-        "type": "proxy_get",
-        "base": "https://anshapi.vercel.app/api/deepseek",
-        "key": _env("DS_KEY", "ansh"),
-        "models": ["deepseek-v4-flash"],
-        "max_chars": 6500,
-    },
     "GROQ": {
         "type": "oai",
         "base": "https://api.groq.com/openai/v1",
@@ -138,90 +96,19 @@ APIS = {
         "models": ["nvidia/nemotron-3-ultra-550b-a55b", "poolside/laguna-xs-2.1"],
         "vision": "meta/llama-3.2-11b-vision-instruct",
     },
-    "DAI": {
-        "type": "deepai",
-        "base": "https://api.deepai.org/hacking_is_a_serious_crime",
-        "key": _env("DAI_KEY", "tryit-8803332334-5329fed31418c18274ac106f280207f3"),
-        "models": ["standard"],
-        "max_chars": 3000,
-    },
-    "UAI": {                       # UnlimitedAI (app.unlimitedai.chat), guest chat, bina login/proxy: DeepAI ke theek peeche
-        "type": "uai",
-        "base": _env("UAI_URL", "https://app.unlimitedai.chat/api/chat"),
-        "key": _env("UAI_KEY", "guest"),     # asli key nahi chahiye; bas 'ready' ke liye koi bhi text
-        "models": ["chat-model-reasoning"],
-        "max_chars": 6000,
-        "timeout": 150,            # reasoning model hai: dheere jawab deta hai
-        "min_gap": 2,
-        "rate_cool": 120,          # 429/limit par 2 min aaram
-    },
 }
 
-# ---- rev9.top (OpenAI jaisa /v1/chat/completions). Har model alag provider => ⚙ AI panel me har ek ka alag ON/OFF ----
-# Key/URL badalni ho to environment: REV_KEY, REV_BASE. HAIKU = DSX band/cooldown me ho to uski jagah plan + aakhri jaanch karta hai.
-REV_BASE = _env("REV_BASE", "https://rev9.top/v1")
-REV_KEY = _env("REV_KEY", "mgw_6mk9mnuUvEZp_Md-axteDysQOa0_sKYJSpRtJADYDh4")
-for _n, _m, _grp, _tier, _gap in (
-        ("MIMO26", "mimo-v2.6-flash:free", "rev9", "cheap", 1),
-        ("MIMO25", "mimo-v2.5:free", "rev9", "cheap", 1),
-        ("DSF41", "deepseek-v4.1-flash:free", "rev9", "cheap", 1),
-        ("DSF4", "deepseek-v4-flash:free", "rev9", "cheap", 1),
-        ("HAIKU", "claude-haiku-5.5:free", "haiku", "strong", 2)):
-    APIS[_n] = {
-        "type": "oai",
-        "base": REV_BASE,
-        "key": REV_KEY,
-        "models": [_m],
-        "timeout": 240,
-        "total_timeout": 900,
-        "group": _grp,
-        "tier": _tier,
-        "max_conc": 2,
-        "min_gap": _gap,
-        "rate_cool": 60,
-        "retry_429": 1,
-        "max_tokens": 16000,       # server mana kare to ask_oai asli hadd seekh leta hai (LEARN_MT)
-        **({"max_ctx": int(_env("HAIKU_CTX", "100000"))} if _n == "HAIKU" else {}),
-    }
+# ---- rev9.top, Gemini (GEM/GEM2/GEM3), DS, DAI, UAI -- ab sab yahan nahi, ye sab jaat-api gateway (JAAT) ke peeche
+# chale gaye hain. jaat-api worker khud in sab (+ 63 free model) me rotate karta hai, isliye yahan ek hi "JAAT" entry
+# rakhni hoti hai, aur sirf ek JAAT_KEY env me set karni hoti hai (blitz.cloud ke environment me).
 
-# ---- rev9.top ke 4 naye key-group (alag key, alag model). Har ek alag provider => ⚙ AI panel me alag ON/OFF ----
-# Env se key badal sakte ho: REV_GROK_KEY, REV_PRO_KEY (DeepSeek-V4-Pro + Kimi dono), REV_LUNA_KEY.
-# GROK ke andar 10 model ki list hai: ask_oai ek band ho to apne aap agla model lagata hai, aur rev9_probe() chat se pehle
-# jaanch ke chalne wale model aage kar deta hai. Claude (HAIKU) wala upar jaisa tha waisa hi hai.
-REV_GROK_KEY = _env("REV_GROK_KEY", "mgw_XhUazvkvNMoSrD0sOX3bQ_3v67t5eUBKWP-h3bCstKE")
-REV_PRO_KEY = _env("REV_PRO_KEY", "mgw_YmoeQVZ6XUtrX37SZaSgDK9ilvHbOU3AY0STJW6aXSA")
-REV_LUNA_KEY = _env("REV_LUNA_KEY", "mgw_3wMuei0b6wQdaH5GgNNjoTWoWcmNM7K55AmDWOI3Fxs")
-REV2 = ("GROK", "DSPRO", "KIMI", "LUNA")
-for _n, _key, _models in (
-        ("GROK", REV_GROK_KEY, ["grok-4.7", "grok-4.6", "grok-4.5-latest", "grok-4.5", "grok-latest", "grok",
-                                "grok-build-latest", "grok-composer", "composer-2.5", "grok-composer-2.5-fast"]),
-        ("DSPRO", REV_PRO_KEY, ["DeepSeek-V4-Pro"]),
-        ("KIMI", REV_PRO_KEY, ["Kimi-K2.7-Code"]),
-        ("LUNA", REV_LUNA_KEY, ["gpt-6-luna"])):
-    APIS[_n] = {
-        "type": "oai",
-        "base": REV_BASE,
-        "key": _key,
-        "models": _models,
-        "timeout": 240,
-        "total_timeout": 900,
-        "group": _n.lower(),
-        "tier": "strong",
-        "max_conc": 2,
-        "min_gap": 1,
-        "rate_cool": 60,
-        "retry_429": 1,
-        "max_tokens": 16000,
-        "max_ctx": int(_env("REV2_CTX", "120000")),
-    }
-
-# ---- bada jawab (token) + image dekhna: JAAT aur Gemini (conf se badal sakte ho) ----
-for _n, _tok in (("JAAT", 10400), ("GEM", 60000), ("GEM2", 8192), ("GEM3", 60000)):   # JAAT ~10,600 token par kat jata hai; GEM2 32000 par 502 deta hai (test se pata chala)
+# ---- bada jawab (token): JAAT (conf se badal sakte ho) ----
+for _n, _tok in (("JAAT", 10400),):   # JAAT ~10,600 token par kat jata hai
     if _n in APIS:
         APIS[_n].setdefault("max_tokens", _tok)
         APIS[_n]["total_timeout"] = max(APIS[_n].get("total_timeout", 0), 600)   # lamba jawab beech me na kate
         APIS[_n].setdefault("vision", APIS[_n]["models"][0])                     # image dekhne ke liye wahi model
-VISION_PREF = ("GEM", "GEM2", "GEM3", "JAAT", "NV2")                               # image: pehle Gemini, phir JAAT, phir NV2
+VISION_PREF = ("JAAT", "NV2")                               # image: pehle JAAT (gateway ke peeche jo bhi vision model ho), phir NV2
 
 DEFAULT_APIS = copy.deepcopy(APIS)
 DEFAULT_PRIORITY = list(PRIORITY)
@@ -5143,8 +5030,7 @@ def run_agent(task):
 ASK_WAIT = float(_env("ASK_WAIT", "30"))           # user ke jawab ka intezaar (second, 10 min). Na aaye to 3 AI faisla karte hain
 CRIT_REJECT_MAX, ESC_AT, ESC_MAX = 2, 4, 2          # criteria 2 baar mana; aakhri review 4 baar mana -> user se poochho; ek kaam me max 2 baar
 SPLIT_ROLES = _env("SPLIT_ROLES", "1") != "0"       # plan/review mazboot model se, likhna sasta/tez model se (0 = band)
-TIER = {"JAAT": "strong", "NV2": "strong", "GEM": "strong", "GEM2": "strong", "GEM3": "strong", "DSX": "strong",
-        "DS": "cheap", "GROQ": "cheap", "DAI": "cheap", "UAI": "cheap"}          # providers.json me "tier": "strong"/"cheap" se badal sakte ho
+TIER = {"JAAT": "strong", "NV2": "strong", "DSX": "strong", "GROQ": "cheap"}          # providers.json me "tier": "strong"/"cheap" se badal sakte ho
 SEEKHA_FILE = os.path.join(ROOT, ".mumbai", "seekha.md")
 PREVIEW_DIR = os.path.join(ROOT, ".mumbai", "preview")
 STATE.update(asking=None, answer=None, utype="", goal="", criteria=[], strong_n=0)
@@ -5154,7 +5040,7 @@ def tier(name):
     return APIS[name].get("tier") or TIER.get(name, "strong")
 
 
-LIGHT_PREF = ("DS", "GROQ", "GEM", "GEM2", "GEM3")      # chhote (light) kaam me pehle ye, JAAT/baaki baad me
+LIGHT_PREF = ("GROQ",)      # chhote (light) kaam me pehle ye, JAAT/baaki baad me
 
 
 def role_order(role):
@@ -5985,7 +5871,7 @@ function drawPlan(){if(!planBox)return;var done=planBox.items.filter(function(x)
 function toggleMenu(ev){ev.stopPropagation();var m=document.getElementById('menu');m.style.display=m.style.display=='block'?'none':'block'}
 function mnu(a){document.getElementById('menu').style.display='none';if(a=='conf')openConf();else if(a=='files')openFiles();else actPost(a)}
 document.addEventListener('click',function(){var m=document.getElementById('menu');if(m)m.style.display='none'});
-var NOISE=/(HTTP\s?\d{3}|\b429\b|rate.?limit|bheed|aaram|ruk ke dobara|org_\w+|cooldown)/i,PROV=/^(JAAT|GEM\d?|GROQ|DS|NV2|DAI|UAI|DSX|HAIKU|MIMO\d+|DSF\d+|GROK|DSPRO|KIMI|LUNA)\b/;
+var NOISE=/(HTTP\s?\d{3}|\b429\b|rate.?limit|bheed|aaram|ruk ke dobara|org_\w+|cooldown)/i,PROV=/^(JAAT|GROQ|NV2|DSX)\b/;
 var act=null,actBody=null,actN=0,lastAi=null,doneShown=false,stopping=false,curLevel=0,curPlan=[0,0];
 function actBox(){if(!act){act=el('details','step act');act.appendChild(el('summary',null,'Kaam chal raha hai'));actBody=el('div','actb');act.appendChild(actBody);actN=0;chat.appendChild(act)}return actBody}
 function actSay(t){if(!act)return;actN++;act.firstChild.textContent=t+(actN>1?'  \u00b7  '+actN+' kadam':'')}
@@ -6762,21 +6648,21 @@ def setup():
 # -> Groq har file ka chhota memory card MEMORY.md me rakhe -> aakhir me mismatch jaanch
 CODE_FLOW = _env("CODE_FLOW", "1") != "0"        # 0 = purana flow
 SCAN_ON_CHECK = True                             # code/android me review har @@EDIT par nahi, file poori hone par (@@CHECK / @@DONE)
-EXAM_PREF = ("JAAT", "GEM", "GROQ", "GEM2", "GEM3", "DS")   # task dekhne wale (pehle 2 jo jawab dein)
-PLANNER_PREF = ("DSX", "HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2", "DAI", "UAI")  # architect/planners, no JAAT
-MERGER_PREF = ("DSX", "HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GEM", "GEM2", "GEM3")       # independent plan merge, no JAAT
-SCAN_PREF = ("GROQ", "DS", "NV2", "HAIKU", "DSPRO", "LUNA", "GROK", "KIMI")                # independent file scanner; writer is not first reviewer
-SCAN_BACKUP = ("NV2", "DAI", "UAI")
+EXAM_PREF = ("JAAT", "GROQ")   # task dekhne wale (pehle 2 jo jawab dein)
+PLANNER_PREF = ("GROQ", "NV2", "DSX")  # architect/planners, no JAAT
+MERGER_PREF = ("DSX",)       # independent plan merge, no JAAT
+SCAN_PREF = ("GROQ", "NV2")                # independent file scanner; writer is not first reviewer
+SCAN_BACKUP = ("NV2",)
 DS_PARTS_MAX = 6                                      # DS badi file ke itne tukde tak scan karta hai
 GEM_BIG_CHARS = 4000                                # Gemini sirf badi file par (ya aakhri @@DONE scan me)
 QUICK_MIN_LINES, QUICK_MAX = 40, 8                 # bade @@WRITE/@@EDIT par halka Groq scan (salah ki tarah, @@CHECK nahi rokta)
-GEM_PREF = ("GEM", "GEM2", "GEM3")
+GEM_PREF = ()
 GEM_SCAN_MAX = 2                                    # Gemini ek kaam me bug-scan me sirf itni baar
 GEM_BUILD_STEPS = 3                                 # shuru ke itne kadam Gemini banaye, phir JAAT/Groq/DS
 PLAN_GAP_ROUNDS = 2
 MEMO_FILE = "MEMORY.md"
-CODE_WRITE_PREF = ("JAAT", "HAIKU", "KIMI", "DSPRO", "LUNA", "GROK", "GROQ", "DS", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25", "GEM", "GEM2", "GEM3", "DAI", "UAI", "DSX")
-CODE_PLAN_PREF = ("DSX", "HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2")
+CODE_WRITE_PREF = ("JAAT", "GROQ", "NV2", "DSX")
+CODE_PLAN_PREF = ("GROQ", "NV2", "DSX")
 # level -> (lines kam se kam, lines zyada se zyada, files)
 LEVEL_SCOPE = {1: (50, 100, 1), 2: (100, 200, 1), 3: (200, 400, 2), 4: (400, 700, 3), 5: (700, 1000, 4),
                6: (1000, 1500, 5), 7: (1500, 2500, 7), 8: (2500, 4000, 9), 9: (4000, 6000, 12), 10: (6000, 10000, 15)}
@@ -6999,7 +6885,7 @@ def plan_pipeline(task, goal, level, typ):
     for rnd in range(gap_rounds):                   # kuch bacha to nahi?
         if STATE["cancel"]:
             break
-        ck = pick_slots(("DSX", "HAIKU", "DSPRO", "LUNA", "GROK", "GROQ", "DS", "JAAT"), 4)
+        ck = pick_slots(("JAAT", "GROQ", "DSX"), 4)
         ck = [(n, m) for n, m in ck if fits(n, 6000)][:1]
         if not ck:
             break
@@ -7009,7 +6895,7 @@ def plan_pipeline(task, goal, level, typ):
         if not miss:
             break
         ev("note", text="🔎PLANCHK\n%s\n%s" % (ck[0][0], "\n".join(miss)))
-        fx = pick_slots(("DSX", "HAIKU", "DSPRO", "LUNA", "GROK", "JAAT", "GROQ"), 3)
+        fx = pick_slots(("JAAT", "GROQ", "DSX"), 3)
         fx = [(n, m) for n, m in fx if fits(n, 9000)][:1]
         if not fx:
             break
@@ -7139,7 +7025,7 @@ def scan_call(system, user, rel=""):
     @@DONE scan me, poore kaam me GEM_SCAN_MAX baar se zyada nahi (ek baar aakhri scan ke liye bachi rehti hai)."""
     size = len(system) + len(user)
     slots = pick_slots(SCAN_PREF, 2, size)
-    ds = pick_slots(("DS",), 1)
+    ds = pick_slots((), 1)
     if len(slots) + len(ds) < 2:         # DS ki jagah NV2/DAI tabhi, jab JAAT/Groq/DS milkar 2 na bane
         slots += pick_slots(SCAN_BACKUP, 2 - len(slots) - len(ds), size)
     used = TRACK.get("gem_scans", 0)
@@ -7222,7 +7108,7 @@ def quick_scan(rel):
     if txt.count("\n") < QUICK_MIN_LINES or _QUICK_SEEN.get(rel) == len(txt):
         return ""
     user = "SPEC:\n%s\n\n%s\n\nFILE: %s\n%s" % ("\n".join(TRACK["spec"]) or "(none)", all_files_line(), rel, _numbered(txt))
-    sl = pick_slots(("GROQ", "DS", "JAAT"), 1, len(QUICK_SYS) + len(user))
+    sl = pick_slots(("JAAT", "GROQ"), 1, len(QUICK_SYS) + len(user))
     if not sl:
         return ""
     TRACK["quick_n"] = TRACK.get("quick_n", 0) + 1
@@ -7282,7 +7168,7 @@ def file_memo(rel):
         return
     user = "FILE: %s\n%s" % (rel, txt[:9000])
     card = ""
-    for nm, m in pick_slots(("GROQ", "DS", "JAAT"), 3):
+    for nm, m in pick_slots(("JAAT", "GROQ"), 3):
         if not fits(nm, len(MEMO_SYS) + len(user)):
             continue
         t = call_slot(nm, m, MEMO_SYS, user)
@@ -7351,7 +7237,7 @@ def small_final_review():
     if not parts:
         return None, ""
     user = "TASK:\n%s\n\nDONE CONDITIONS:\n%s\n\n%s" % ((STATE.get("task") or "")[:2000], "\n".join(STATE.get("criteria") or []) or "(none)", "\n\n".join(parts))
-    for nm, md in pick_slots(("GEM", "JAAT", "DS", "NV2", "GROQ"), 2, len(user) + len(SMALL_FINAL_SYS)):
+    for nm, md in pick_slots(("JAAT", "GROQ", "NV2"), 2, len(user) + len(SMALL_FINAL_SYS)):
         t = call_slot(nm, md, SMALL_FINAL_SYS, user)
         d = parse_json_reply(t) if t else None
         b = _norm_bugs(d, "")
@@ -7404,7 +7290,7 @@ if LEAN:
     SPEC_GATE = REVIEW_LOOP = False                   # reviewer / SPEC / aakhri review: extra AI calls band
     SCAN_ON_CHECK = CODE_FLOW = False                 # 2 AI examine + 3 AI plan + 4 AI scan band
     SPLIT_ROLES = False                               # likhna chhote model se nahi: JAAT pehle, phir Gemini
-    LIGHT_PREF = ("JAAT", "GEM", "GEM2", "GEM3")
+    LIGHT_PREF = ("JAAT",)
     for _p in PROFILES.values():
         _p.update(spec_min=0, plan_min=0, need_spec=False, spec_review=False, check_review=False, flow=False, polish=False)
     MAX_BODY_LINES = int(_env("MAX_BODY_LINES", "600"))
@@ -7436,7 +7322,7 @@ def _up(n):
     return n in APIS and ready(n) and COOL.get(n, 0) <= time.time()
 
 
-DSX_BACKUPS = ("HAIKU", "DSPRO", "LUNA", "GROK")
+DSX_BACKUPS = ()
 
 
 def dsx_up():
@@ -7552,13 +7438,13 @@ PIPE_EXACT_MAX = int(_env("PIPE_EXACT_MAX", "2"))                   # wahi bug 2
 PIPE_STEP_LINES = int(_env("PIPE_STEP_LINES", "500"))               # JAAT ek file me itni line se zyada nahi likh paata (~10k token)
 PIPE_FILES_MAX = 25
 PIPE_OUT = int(_env("PIPE_OUT_TOKENS", "64000"))                    # plan / bug-list / exact-fix me jawab ki upari hadd (provider ki apni hadd se zyada nahi jaata)
-PLAN_PREF = ("DSX", "HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GEM", "GEM2", "GEM3", "GROQ", "NV2")       # plan: DSX/Haiku/Gemini; JAAT planner nahi
-WRITE_PREF = ("JAAT", "HAIKU", "KIMI", "DSPRO", "LUNA", "GROK", "GEM", "GEM2", "GEM3", "NV2", "GROQ", "DSF41", "MIMO26", "DSF4", "MIMO25", "DS", "DAI", "UAI", "DSX")  # JAAT primary coder, Haiku backup writer
-FIX_PREF = ("JAAT", "HAIKU", "KIMI", "DSPRO", "LUNA", "GROK", "GEM", "GEM2", "GEM3", "NV2", "GROQ", "DSF41", "MIMO26", "DSF4", "MIMO25", "DS", "DAI", "UAI", "DSX")  # JAAT/Haiku bug-fix team
-CHECK_PREF = ("DS", "GROQ", "NV2", "HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "DSF41", "MIMO26", "DSF4", "MIMO25")  # independent code checks
-FINAL_PREF = ("DSX", "HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GEM", "GEM2", "GEM3", "GROQ", "NV2")         # final audit: architect/reviewers, not JAAT writer
-EXPLAIN_PREF = ("HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2")       # setup explanation, not JAAT
-CHAT_PREF = ("HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GROQ", "DS", "DAI", "UAI", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")  # normal chat never JAAT
+PLAN_PREF = ("GROQ", "NV2", "DSX")       # plan: DSX/Haiku/Gemini; JAAT planner nahi
+WRITE_PREF = ("JAAT", "GROQ", "NV2", "DSX")  # JAAT primary coder, Haiku backup writer
+FIX_PREF = ("JAAT", "GROQ", "NV2", "DSX")  # JAAT/Haiku bug-fix team
+CHECK_PREF = ("GROQ", "NV2")  # independent code checks
+FINAL_PREF = ("GROQ", "NV2", "DSX")         # final audit: architect/reviewers, not JAAT writer
+EXPLAIN_PREF = ("GROQ", "NV2")       # setup explanation, not JAAT
+CHAT_PREF = ("GROQ", "NV2")  # normal chat never JAAT
 PIPE_ST = {}                                                        # chalti pipeline ki halat (disk par .mumbai/pipe.json me bhi)
 PIPE_LOCK = threading.RLock()
 CHECK_EXT = (".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".html", ".kt", ".java", ".go", ".rs", ".c", ".cpp", ".sh", ".css")
@@ -8524,9 +8410,6 @@ def small_check_job(rel, idx):
         if _plain_ok(nm, CHK_SYS, user):
             r = gen_call(nm, CHK_SYS, user, mt=2500)
             t = r[0] if r else None
-        elif nm == "DS":
-            m = models_of(APIS["DS"])
-            t = ds_scan("DS", m[0], rel) if m else None       # badi file: chhote tukdon me
         d = _norm_bugs(parse_json_reply(t), rel) if t else None
         if d is not None:
             return drop_phantom(d)[:5], nm
@@ -8976,7 +8859,7 @@ def final_phase():
                 by.setdefault(rel, []).append(b)
         if not by:
             continue
-        names = [n for n in CHECK_PREF if avail((n,))] or ["DS"]
+        names = [n for n in CHECK_PREF if avail((n,))] or ["GROQ"]
         ev("note", text="🔧 JAAT fix kar raha hai (ek saath %d tak): %s" % (PIPE_PAR, ", ".join(by)))
         fns = [(lambda r=r, bl=bl, i=i: fix_job(r, bl, exact.get(r, ""), names[i % len(names)])) for i, (r, bl) in enumerate(by.items())]
         results = par_run(fns, 1500)
@@ -9461,12 +9344,12 @@ def run_agent(task):
 VERSION = "5.8"
 ASK_WAIT = float(_env("ASK_WAIT", "600"))                           # user ke jawab ka intezaar 10 min (phir 3 AI faisla karte hain)
 ASK_FIRST = _env("ASK_FIRST", "1") != "0"                           # 0 = naye kaam par shuru ke sawal band
-CHAT_PREF = ("HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GROQ", "DS", "DAI", "UAI", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")  # general chat; JAAT excluded
-STUDY_PREF = ("HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GROQ", "DS", "DAI", "UAI", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")  # explanations/study; JAAT excluded
-TRIAGE_PREF = ("GEM2", "GEM", "GEM3", "HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GROQ", "DS", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")  # Gemini vision/triage; Haiku backup
-QA_PREF = ("HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GROQ", "NV2", "GEM", "GEM2", "GEM3", "DSF41", "MIMO26", "DSF4", "MIMO25", "DS", "DAI", "UAI", "DSX", "JAAT")  # all providers can answer project/file questions via cards + NEED/READ
-EXPLAIN_PREF = ("HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GEM", "GEM2", "GEM3", "GROQ", "DS", "NV2", "DSF41", "MIMO26", "DSF4", "MIMO25")  # no JAAT
-EXAM_PREF = ("GEM", "HAIKU", "DSPRO", "LUNA", "GROK", "KIMI", "GROQ", "GEM2", "GEM3", "DS", "DSF41", "MIMO26", "DSF4", "MIMO25")  # task understanding, no JAAT
+CHAT_PREF = ("GROQ", "NV2")  # general chat; JAAT excluded
+STUDY_PREF = ("GROQ", "NV2")  # explanations/study; JAAT excluded
+TRIAGE_PREF = ("GROQ", "NV2")  # Gemini vision/triage; Haiku backup
+QA_PREF = ("JAAT", "GROQ", "NV2", "DSX")  # all providers can answer project/file questions via cards + NEED/READ
+EXPLAIN_PREF = ("GROQ", "NV2")  # no JAAT
+EXAM_PREF = ("GROQ",)  # task understanding, no JAAT
 
 
 def ask_user(question, options=None, ctx=""):
