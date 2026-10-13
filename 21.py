@@ -27,7 +27,33 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import hashlib, hmac
 
-print("BUILD-MARK 1445 (REV2+DATA fix) - agar ye line log me dikhe to naya code chal raha hai", flush=True)
+print("BUILD-MARK 1500 (crash-reporter) - agar ye line log me dikhe to naya code chal raha hai", flush=True)
+print("BOOT python=%s uid=%s DATA_DIR=%s PORT=%s" % (sys.version.split()[0], os.getuid() if hasattr(os, "getuid") else "?", os.environ.get("DATA_DIR"), os.environ.get("PORT")), flush=True)
+
+
+def _fatal_hook(et, val, tb):
+    """Kuch bhi crash ho to app band hone ke bajay error screen par/log me dikhaye (taaki asli wajah pata chale)."""
+    txt = "".join(traceback.format_exception(et, val, tb))
+    print("FATAL STARTUP ERROR:\n" + txt, flush=True)
+    try:
+        class _H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                b = ("FATAL STARTUP ERROR\n\n" + txt).encode("utf-8", "replace")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+
+            def log_message(self, *a):
+                pass
+        ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT") or 8011)), _H).serve_forever()
+    except Exception as e2:
+        print("error server bhi nahi chala:", e2, flush=True)
+        sys.exit(1)
+
+
+sys.excepthook = _fatal_hook
 
 
 def _env(name, default=""):
