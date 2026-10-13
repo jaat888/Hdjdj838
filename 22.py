@@ -70,7 +70,7 @@ def _env(name, default=""):
 PRIORITY = ["JAAT", "GROQ", "NV2", "DSX"]   # ab bas 4: JAAT (jaat-api gateway, 63+ model usi ke peeche), GROQ, NV2, DSX. Baaki sab JAAT ke andar chale jaate hain.
 DISABLED = set()            # DSX wapas aa gaya: chalu (⚙ AI panel se chahe to band karo)
 APIS = {
-    "JAAT": {                      # JAAT (main, sabse zyada yahi chalega). Ek time par 1 request; 429 par 2 baar retry, cooldown bahut kam
+    "JAAT": {                      # JAAT (main, sabse zyada yahi chalega). Kai request ek saath le leta hai (plan/pipeline me set_conc() PIPE_PAR tak badha deta hai); 429 par 2 baar retry, cooldown bahut kam
         "type": "oai",
         "base": "https://jaat-api.haxnainbolte.workers.dev/v1",
         "key": _env("JAAT_KEY", "sk-jaat"),
@@ -7549,7 +7549,9 @@ PIPE_ROUNDS = max(1, int(_env("PIPE_ROUNDS", "3")))                 # DSX ke aak
 PIPE_PAR = max(1, min(4, int(_env("PIPE_PAR", "4"))))               # JAAT ek saath itni files likhe
 PIPE_EXACT_MAX = int(_env("PIPE_EXACT_MAX", "2"))                   # wahi bug 2+ baar aaye to DSX ko "exact fix do" hard prompt (kul itni baar)
 PIPE_STEP_LINES = int(_env("PIPE_STEP_LINES", "500"))               # JAAT ek file me itni line se zyada nahi likh paata (~10k token)
-PIPE_FILES_MAX = 25
+PIPE_FILES_MAX = max(25, int(_env("PIPE_FILES_MAX", "60")))         # bade project (main plan + sub-plan) me itni files tak
+PLAN_MODS_MAX = max(2, min(10, int(_env("PLAN_MODS_MAX", "8"))))   # bade project me max kitne module (har module ka alag sub-plan)
+PLAN_SPLIT = _env("PLAN_SPLIT", "1") != "0"                         # 0 = bade project me bhi ek hi plan (sub-plan band)
 PIPE_OUT = int(_env("PIPE_OUT_TOKENS", "64000"))                    # plan / bug-list / exact-fix me jawab ki upari hadd (provider ki apni hadd se zyada nahi jaata)
 PLAN_PREF = ("NV2", "DSX")       # plan ka backup (GROQ plan se bahar); pehle plan_slots() ke JAAT reasoning models
 PLAN_TMO = int(_env("PLAN_TIMEOUT", "900"))   # plan ke liye kul intezaar (sec)
@@ -8114,9 +8116,9 @@ def norm_bp(d):
     groups = [[f["path"] for f in files if f["group"] == g] for g in range(1, len(order) + 1)]
     cm = d.get("commands") if isinstance(d.get("commands"), dict) else {}
     return {"summary": clip(str(d.get("summary") or "").strip(), 220), "stack": clip(str(d.get("stack") or "").strip(), 180),
-            "notes": clip(str(d.get("notes") or "").strip(), 1200), "files": files, "groups": groups,
+            "notes": clip(str(d.get("notes") or "").strip(), 2400), "files": files, "groups": groups,
             "commands": {k: _lst(cm.get(k), 8, 220) for k in ("setup", "run", "deploy", "test")},
-            "env": _lst(d.get("env"), 12, 200), "spec": [s for s in _lst(d.get("spec"), 10, 300) if len(s) >= 8]}
+            "env": _lst(d.get("env"), 12, 200), "spec": [s for s in _lst(d.get("spec"), 16, 300) if len(s) >= 8]}
 
 
 _norm_bp_5x = norm_bp
@@ -8161,9 +8163,11 @@ def bp_plan_items(bp):
 
 
 def bp_md(bp):
-    L = ["", "## Plan (DSX)", "Kaam: " + (bp["summary"] or "-"), "Stack: " + (bp["stack"] or "-")]
+    L = ["", "## Plan", "Kaam: " + (bp["summary"] or "-"), "Stack: " + (bp["stack"] or "-")]
     if bp["notes"]:
         L.append("Shared niyam: " + bp["notes"])
+    if bp.get("modules"):
+        L.append("Modules (main plan + sub-plan): " + " ; ".join("%s (%s)" % (m["name"], ", ".join(m.get("files") or [])) for m in bp["modules"]))
     L.append("Files:")
     L += ["- %s (group %d)%s: %s" % (f["path"], f["group"], " [purani file, badlegi]" if f.get("action") == "modify" else "", f["purpose"] or "-") for f in bp["files"]]
     for k in ("setup", "run", "deploy", "test"):
@@ -8226,16 +8230,143 @@ def plan_slots():
     return out[:4]
 
 
+BIG_SPLIT_RULE = (
+    " 10) BIG PROJECT = MAIN PLAN + SUB-PLANS. If the project needs more than 10 files or has 4 or more screens/features, write only the MAIN PLAN now: "
+    "in files list ONLY the shared foundation (config, constants, manifests, data layer, shared UI/theme, app entry/navigation) with full contracts, and describe everything else in an extra key "
+    '"modules":[{"name":"cart","brief":"3-6 lines: its screens, what they show or do, the data they use",'
+    '"interface":["exact export lines that OTHER files (app entry, other modules) call, e.g. openCart(userId) -> void"],"files_hint":["cart/cart_screen.js"]}]. '
+    "Use 2 to 8 modules, each about 2-6 files. A separate architect then plans every module in detail, seeing your design, your shared contract and the interface of every module, "
+    "so fix the interface lines and the files_hint paths exactly, and let the app entry reach a module only through its interface lines. "
+    "If the project is small, leave modules out and list all files as usual.")
+
+SUBPLAN_SYS = (
+    "You are the module architect of a big software project. The MAIN PLAN you get is already decided and fixed; other architects plan the other modules at the same time. "
+    "Plan ONLY the files of the module you are given. OTHER AI writers write each file at the same time, ONE file per request, and cannot see each other's files, "
+    "so the contract you write is all they share. Reply with ONLY one JSON object, no prose, no code fence: "
+    '{"files":[{"path":"cart/cart_screen.js","purpose":"what this file does","group":1,"max_lines":300,"exports":["name(arg) -> return type : meaning"],"imports":["other.js: nameA"]}],'
+    '"notes":"rules only the files of this module share (ids, keys, data shapes), at most 5 lines","spec":["WHEN ... THEN ..."]}. RULES: '
+    "1) Use the files_hint paths of your module exactly; add more files only if really needed (2-6 files in all, at most MAXL lines each). Never list a file that the MAIN PLAN or another module already lists. "
+    "2) Your files MUST together export every INTERFACE line of your module, with exactly the written names and shapes. "
+    "3) Import from the shared foundation files and from other modules ONLY names shown in the MAIN PLAN contract or in a module INTERFACE. Never invent a name that is not there. "
+    "4) group = 1,2,3...: files of the same group do not import each other; a file that imports another file of this module goes to a later group; files that import only shared foundation files are group 1. "
+    "5) For every file give exact exports (name, parameters, return shape) and imports. Cover the real screens, data flow and the empty, loading and error states of this module. "
+    "6) spec: 2-4 lines 'WHEN <user action> THEN <visible result>' for this module. Strings short and plain; identifiers in English; purpose may be Hinglish.")
+
+
+def _plan_chain(first=None):
+    """Plan karne wale models ka order: [(provider, model)] reasoning models (first sabse pehle), phir plan ke backup [(provider, None)]."""
+    chain = list(plan_slots())
+    if first and first in chain:
+        chain.remove(first)
+        chain.insert(0, first)
+    return chain + [(x, None) for x in rot_prefs(PLAN_PREF)]
+
+
+def _plan_json(sysmsg, user, ok, first=None, label=""):
+    """Plan wale models ek ek karke (gpt fail ho to agla reasoning model, phir backup): pehla jawab jiske JSON par ok(dict) True ho. Chhote Gemini/GROQ kabhi nahi."""
+    for nm, md in _plan_chain(first):
+        if STATE["cancel"]:
+            return None
+        if md is not None:
+            if not ready(nm) or COOL.get(nm, 0) > time.time():
+                continue
+        elif not avail((nm,), len(sysmsg) + len(user)):
+            continue
+        for t in range(2):
+            u = user if not t else user + "\n\n[Pichhla jawab sahi JSON nahi tha. Sirf ek JSON object do.]"
+            if nm == "DSX":
+                PIPE_ST["dsx_calls"] = PIPE_ST.get("dsx_calls", 0) + 1
+            res = gen_call(nm, sysmsg, u, mt=PIPE_OUT, model=md, tmo=(PLAN_TMO if md else None))
+            if not res:
+                break
+            dd = parse_json_reply(res[0])
+            if isinstance(dd, dict) and ok(dd):
+                return dd
+        ev("note", text="↷ %s%s se %s nahi bana, agle model par ja raha hoon" % (nm, ("/" + md) if md else "", label or "plan"), _log=False)
+    return None
+
+
+def _has_files(dd):
+    return isinstance(dd.get("files"), list) and any(isinstance(f, dict) and norm_path(f.get("path")) for f in dd["files"])
+
+
+def expand_modules(user, dd, bp, first):
+    """Bada project: main plan (bp) me 'modules' ho to har module ka sub-plan alag architect-call me, ek saath. Sab files ek contract me jud kar naya bp. Na ban paye to main plan hi lautata hai."""
+    if not PLAN_SPLIT or not isinstance(dd, dict):
+        return bp, dd
+    mods = []
+    for m in (dd.get("modules") if isinstance(dd.get("modules"), list) else []):
+        if isinstance(m, dict) and str(m.get("name") or "").strip():
+            mods.append({"name": clip(str(m["name"]).strip(), 40), "brief": clip(str(m.get("brief") or "").strip(), 700),
+                         "interface": _lst(m.get("interface"), 12, 200),
+                         "files_hint": [p for p in (norm_path(x) for x in _lst(m.get("files_hint"), 8, 120)) if p]})
+    mods = mods[:PLAN_MODS_MAX]
+    if len(mods) < 2:
+        return bp, dd
+    design = clip(str(dd.get("design") or "").strip(), 2500)
+    ev("note", text="🗺 Bada project: main plan ban gaya (%d shared file). Ab %d module ke sub-plan ek saath ban rahe hain: %s" % (
+        len(bp["files"]), len(mods), ", ".join(m["name"] for m in mods)))
+    table = "\n".join("- %s: %s | INTERFACE: %s | FILES: %s" % (m["name"], clip(m["brief"], 260), " ; ".join(m["interface"]) or "-", ", ".join(m["files_hint"]) or "-") for m in mods)
+    main_ctx = "%s\n\nMAIN DESIGN:\n%s\n\nMAIN SHARED RULES: %s\n\nSHARED FOUNDATION FILES (main plan contract):\n%s\n\nALL MODULES (name | brief | interface | files):\n%s" % (
+        user, design or "-", bp.get("notes") or "-", contract_text(bp, 9000), table)
+    sysmsg = SUBPLAN_SYS.replace("MAXL", str(PIPE_STEP_LINES)) + (PLAN_EXISTING_RULES if project_has_files() else "")
+
+    def one(m):
+        u = main_ctx + "\n\nYOUR MODULE: %s\nBRIEF: %s\nINTERFACE (you must export exactly these): %s\nFILES_HINT: %s" % (
+            m["name"], m["brief"], " ; ".join(m["interface"]) or "-", ", ".join(m["files_hint"]) or "-")
+        return _plan_json(sysmsg, u, _has_files, first=first, label="module '%s' ka sub-plan" % m["name"])
+    set_conc()                                               # JAAT kai request ek saath leta hai: sab module saath me
+    results = par_run([(lambda m=m: one(m)) for m in mods], PLAN_TMO)
+    raw = [f for f in dd["files"] if isinstance(f, dict)]
+    known = {norm_path(f.get("path")) for f in raw}
+    notes_x, specs_x = [], []
+    for m, r in zip(mods, results):
+        files = (r or {}).get("files") if isinstance(r, dict) else None
+        if not files:                                        # sub-plan na bana: main plan ke hint se kam se kam file+interface
+            ev("note", text="⚠ module '%s' ka sub-plan nahi bana, main plan ke hint se file likhwa raha hoon" % m["name"])
+            files = [{"path": h, "purpose": clip(m["brief"], 200), "group": 1, "max_lines": 300, "exports": (m["interface"] if i == 0 else []), "imports": []}
+                     for i, h in enumerate(m["files_hint"][:4])]
+        m["paths"] = []
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            p = norm_path(f.get("path"))
+            if not p or p in known:
+                continue
+            known.add(p)
+            try:
+                g = max(1, min(8, int(float(f.get("group") or 1))))
+            except (TypeError, ValueError):
+                g = 1
+            f = dict(f, group=g + 1)                         # shared foundation (main plan) se pehle nahi, module ki files baad me
+            raw.append(f)
+            m["paths"].append(p)
+        if isinstance(r, dict):
+            if str(r.get("notes") or "").strip():
+                notes_x.append("[%s] %s" % (m["name"], clip(re.sub(r"\s+", " ", str(r["notes"])).strip(), 320)))
+            specs_x += _lst(r.get("spec"), 4, 300)
+    d2 = dict(dd)
+    d2["files"] = raw
+    d2["notes"] = (str(dd.get("notes") or "").strip() + ("\nMODULE RULES:\n" + "\n".join(notes_x) if notes_x else "")).strip()
+    d2["spec"] = _lst(dd.get("spec"), 8, 300) + specs_x
+    bp2 = norm_bp(d2)
+    if not bp2 or len(bp2["files"]) <= len(bp["files"]):
+        return bp, dd
+    bp2["modules"] = [{"name": m["name"], "brief": clip(m["brief"], 200), "files": m.get("paths") or []} for m in mods]
+    return bp2, d2
+
+
 def make_blueprint(task):
-    """(bp, provider) ya (None, ''). DSX plan banata hai; band/fail ho to Gemini, phir JAAT."""
+    """(bp, provider) ya (None, ''). Bada reasoning model plan banata hai (gpt fail ho to agla reasoning model, phir backup). Bada project ho to pehle main plan, phir har module ka sub-plan."""
     user = ("TASK:\n%s\n\nEXISTING FILES: %s\n\nHARD LIMITS: one writer writes at most %d lines per file. "
             "The user is not technical: choose the simplest stack that runs on a FREE service, secrets only as environment variables." % (
                 (PIPE_ST.get("task") or task)[:4000], existing_block(), PIPE_STEP_LINES))
-    sysmsg = PLAN_SYS_PIPE.replace("MAXL", str(PIPE_STEP_LINES)) + (PLAN_EXISTING_RULES if project_has_files() else "")
-    def _finish(bp, d):
+    sysmsg = PLAN_SYS_PIPE.replace("MAXL", str(PIPE_STEP_LINES)) + (BIG_SPLIT_RULE if PLAN_SPLIT else "") + (PLAN_EXISTING_RULES if project_has_files() else "")
+    def _finish(bp, d, first=None):
+        bp, d = expand_modules(user, d, bp, first)
         dz = clip(str((d or {}).get("design") or "").strip(), 2500)
         if dz:
-            bp["notes"] = clip("DESIGN: " + dz + "\n" + (bp.get("notes") or ""), 3800)
+            bp["notes"] = clip("DESIGN: " + dz + "\n" + (bp.get("notes") or ""), 6500)
         return bp
     for nm, md in plan_slots():
         if STATE["cancel"]:
@@ -8251,7 +8382,7 @@ def make_blueprint(task):
             dd = parse_json_reply(res[0])
             bp = norm_bp(dd)
             if bp:
-                return _finish(bp, dd), nm
+                return _finish(bp, dd, (nm, md)), nm
     for nm in rot_prefs(PLAN_PREF):
         if STATE["cancel"]:
             return None, ""
@@ -8268,7 +8399,7 @@ def make_blueprint(task):
             dd = parse_json_reply(res[0])
             bp = norm_bp(dd)
             if bp:
-                return _finish(bp, dd), nm
+                return _finish(bp, dd, (nm, None)), nm
     return None, ""
 
 
@@ -8660,7 +8791,7 @@ def ensure_missing(bugs, rnd=0):
     if not need or STATE["cancel"]:
         return set()
     set_conc()
-    ev("note", text="📄 DSX ne jo file nahi hai bataya, JAAT banata hai: %s" % ", ".join(need))
+    ev("note", text="📄 plan me jo file nahi thi, JAAT banata hai: %s" % ", ".join(need))
     par_run([(lambda f=f: write_job(f)) for f in need.values()], 2400)
     return {r for r in need if os.path.isfile(os.path.join(WORK, r))}
 
@@ -9148,7 +9279,7 @@ def pipe_run():
                 STATE["plan_ck"].append(_n)
                 ev("check", n=_n)
             n = len(PIPE_ST.get("written") or [])
-            ev("note", text="✅ pipeline poori: %d file, DSX request %d" % (n, PIPE_ST.get("dsx_calls", 0)))
+            ev("note", text="✅ pipeline poori: %d file, bade model ki request %d" % (n, PIPE_ST.get("dsx_calls", 0)))
     except Exception as e:
         log("pipe_run galti: %s\n%s" % (e, traceback.format_exc()[-600:]))
         ev("err", text="⚠ pipeline beech me atki (%s: %s). Jo files ban chuki hain wo safe hain; 'aage badho' likho." % (type(e).__name__, str(e)[:120]))
@@ -9167,7 +9298,9 @@ def approve_plan(task, bp, who):
     for _r in range(2):
         try:
             spec = [clip(str(x), 110) for x in (bp.get("spec") or [])[:6]]
-            ev("note", text="📋 Plan: %s | %s | %d file\nPoora kab:\n%s" % (clip(bp.get("summary") or "", 160), clip(bp.get("stack") or "", 80), len(bp["files"]),
+            mods = "".join("\n  - %s (%d file)" % (m["name"], len(m.get("files") or [])) for m in (bp.get("modules") or []))
+            ev("note", text="📋 Plan: %s | %s | %d file%s\nPoora kab:\n%s" % (clip(bp.get("summary") or "", 160), clip(bp.get("stack") or "", 80), len(bp["files"]),
+                                                                       ("\nMain plan + %d sub-plan:%s" % (len(bp["modules"]), mods)) if bp.get("modules") else "",
                                                                        "\n".join("• " + x for x in spec)))
             ans, how = ask_user("Ye plan theek hai? Haan to files likhna shuru karun, nahi to Badlo.", ["Haan, banao", "Badlo"], ctx="Plan: " + clip(bp.get("summary") or "", 300))
             if how == "stop" or STATE["cancel"]:
@@ -9208,7 +9341,7 @@ def pipeline_entry(task):
     if STATE["cancel"]:
         return ""
     if not bp:
-        ev("note", text="⚠ plan nahi ban paya (DSX/Gemini/JAAT), purane raaste se kaam kar raha hoon")
+        ev("note", text="⚠ plan nahi ban paya (plan models), purane raaste se kaam kar raha hoon")
         return None
     bp, who = approve_plan(task, bp, who)
     if STATE["cancel"]:
@@ -9508,7 +9641,7 @@ def pipe_front(task):
             return True
         if pipe_eligible(task):
             STATE["task"] = task
-            ev("note", text="🧭 bada kaam: DSX plan banayega, JAAT file-file ek saath likhega, aakhir me DSX poora project jaanchega")
+            ev("note", text=pipe_note())
             r = pipeline_entry(task)
             if STATE["cancel"]:
                 pipe_save()
@@ -9780,11 +9913,60 @@ QGEN_SYS = (
     "Each question: short simple Hinglish, 2-4 short options, last option always 'Tum chuno'. Key 'platform' only for where it runs, 'language' only for the programming language, otherwise 'other'.\n"
     "'assumptions': up to 5 short English lines for what you will assume where nothing was asked.\n"
     'Reply ONLY JSON, no prose: {"idea_clear":true,"questions":[{"q":"...","options":["...","...","Tum chuno"],"key":"idea|platform|language|size|other"}],"assumptions":["..."]}')
-SPEC_SYS = (
+INTAKE_SPEC_SYS = (
     "You are the intake helper of a NON-TECHNICAL user. Read the USER MESSAGE and the Q&A and write the requirement for the architect who plans the files. "
     'Reply ONLY JSON: {"platform":"android|web|cli|bot|other|unknown","spec":"one clear English paragraph (under 1400 characters): what to build and for whom, the platform, '
     "the main user journey, EVERY feature named or implied, the answers given, and a last sentence 'Assumptions: ...' listing what you assumed; for each 'Tum chuno' answer the architect picks the simplest free option\"}. "
     "Stay with what the user wants: no unrelated products or features. The usual supporting parts a real app of this kind needs (empty states, error messages, a settings or about screen) are fine. No code.")
+
+
+QGEN_BIG = _env("QGEN_BIG", "1") != "0"                             # 0 = sawal/spec purane tez Gemini/GROQ se
+QGEN_TMO = int(_env("QGEN_TIMEOUT", "120"))                         # har bade model ka intezaar (sec); phir agla reasoning model
+QGEN_SMALL_LAST = _env("QGEN_SMALL_LAST", "0") == "1"               # 1 = sab bade model fail hon to aakhir me chhote Gemini/GROQ
+
+
+def intake_gen(system, user, mt=1200):
+    """(text, naam). Sawal aur spec ke liye bhi plan wale reasoning models, order se: pehla (gpt-5.6-luna) na chale/der kare to agla
+    (gpt-5.4-mini, gem-flash-3.7: PLAN_MODEL/PLAN_DEFAULT), phir plan ke backup (NV2, DSX). Chhote Gemini/GROQ par nahi girta (QGEN_SMALL_LAST=1 se hi).
+    Sab fail hon to ('', '') = purane 2 sawal / bina spec. QGEN_BIG=0 = purana tez raasta."""
+    if QGEN_BIG:
+        try:
+            set_conc()                                              # JAAT kai request ek saath leta hai: atki request agli ko nahi rokti
+            chain = [(nm, md) for nm, md in plan_slots()] + [(x, None) for x in rot_prefs(PLAN_PREF)]
+            for nm, md in chain:
+                if STATE["cancel"]:
+                    return "", ""
+                if md is not None:
+                    if not ready(nm) or COOL.get(nm, 0) > time.time():
+                        continue
+                elif not avail((nm,), len(system) + len(user)):
+                    continue
+                r = par_run([lambda nm=nm, md=md: gen_call(nm, system, user, mt=max(mt, 4000), model=md, tries=1, tmo=QGEN_TMO)], secs=QGEN_TMO)[0]
+                if r and r[0].strip():
+                    return clean_reply(r[0]).strip(), (md or nm)
+                if STATE["cancel"]:
+                    return "", ""
+                log("intake_gen: %s/%s se jawab nahi aaya, agla reasoning model" % (nm, md))
+                ev("note", text="↷ %s se jawab nahi aaya, agle bade model par ja raha hoon" % (md or nm), _log=False)
+        except Exception as e:
+            log("intake_gen galti: %s" % e)
+        if not QGEN_SMALL_LAST:
+            return "", ""
+    return small_gen(system, user, mt, TRIAGE_PREF, fast=True)
+
+
+def big_names():
+    """screen par dikhane ke liye: (plan model, aakhri jaanch model) ka asli naam."""
+    try:
+        p, f = plan_slots(), final_slots()
+        return (p[0][1] if p else "bada model"), (f[0][1] if f else "bada model")
+    except Exception:
+        return "bada model", "bada model"
+
+
+def pipe_note():
+    p, f = big_names()
+    return "🧭 bada kaam: %s plan banayega, JAAT file-file ek saath likhega, aakhir me %s poora project jaanchega" % (p, f)
 
 
 def default_questions_start(task):
@@ -9800,11 +9982,11 @@ def build_questions(task, answers=None):
     """(sawal, idea_clear, assumptions). Gemini message padhta hai: idea saaf nahi to sirf EK khula sawal (idea_clear=False),
     saaf ho to idea ke hisaab ke 0-4 sawal. answers di ho to 'ANSWERS SO FAR' ke saath dobara. Gemini na chale to purane 2 sawal."""
     try:
-        ev("note", text="🧠 Gemini aapka message padh raha hai, zaroori sawal soch raha hai...", _log=False)
+        ev("note", text="🧠 Aapka message padh ke zaroori sawal soch raha hoon...", _log=False)
         user = "USER MESSAGE:\n" + clip(task, 2500)
         if answers:
             user += "\n\nANSWERS SO FAR:\n" + clip("\n".join(answers), 1500)
-        txt, nm = small_gen(QGEN_SYS, user, 1400, TRIAGE_PREF, fast=True)
+        txt, nm = intake_gen(QGEN_SYS, user, 1400)
         d = parse_json_reply(txt) if txt else None
         items = d.get("questions") if isinstance(d, dict) else (d if isinstance(d, list) else None)
         if items is None:
@@ -9833,7 +10015,7 @@ def gem_spec(task, answers, assumptions=None):
         user = "USER MESSAGE:\n%s\n\nQ&A:\n%s" % (clip(task, 2500), "\n".join(answers) or "-")
         if assumptions:
             user += "\n\nINTAKE ASSUMPTIONS:\n" + "\n".join("- " + x for x in assumptions)
-        txt, nm = small_gen(SPEC_SYS, user, 1200, TRIAGE_PREF, fast=True)
+        txt, nm = intake_gen(INTAKE_SPEC_SYS, user, 1200)
         d = parse_json_reply(txt) if txt else None
         if isinstance(d, dict):
             return str(d.get("platform") or "").lower(), clip(str(d.get("spec") or "").strip(), 1500)
@@ -9887,7 +10069,7 @@ def ask_first(task):
 def android_prepare(task_plain):
     """Android template (gradle, manifest, theme, icon, GitHub Actions) pehle banao: pipeline ab sirf app ki files likhegi."""
     name = app_name_for(task_plain)
-    ev("note", text="📱 Android app: pehle template (gradle, manifest, GitHub Actions) bana raha hoon, phir DSX plan, JAAT likhega")
+    ev("note", text="📱 Android app: pehle template (gradle, manifest, GitHub Actions) bana raha hoon, phir %s plan, JAAT likhega" % big_names()[0])
     res, made, ok, _c = do_template("android " + name)
     ev("step", kind="TEMPLATE", arg="android " + name, out=clip(res, 700), ok=bool(ok), prov="mumbai")
     wl("TEMPLATE android %s" % name)
@@ -9897,7 +10079,7 @@ def android_prepare(task_plain):
 def run_pipeline_for(task_plain, task_for_plan, plat):
     """True = nipta; False = pipeline plan nahi bana paya (purana agent loop)."""
     STATE["task"] = task_plain
-    ev("note", text="🧭 bada kaam: DSX plan banayega, JAAT file-file ek saath likhega, aakhir me DSX poora project jaanchega")
+    ev("note", text=pipe_note())
     r = pipeline_entry(task_for_plan)
     if STATE["cancel"]:
         pipe_save()
@@ -9976,7 +10158,7 @@ def triage(task):
     if imgs:
         ev("note", text="👁 Gemini aapki photo padh raha hai (error/bug kya hai)...")
         img_txt = read_images(imgs)
-    ev("note", text="🧠 Gemini (fast) aapki dikkat dekh raha hai; bada ulta-pulta hua to DSX ko mote jankari jayegi, chhota hua to Gemini khud batayega", _log=False)
+    ev("note", text="🧠 Gemini (fast) aapki dikkat dekh raha hai; bada ulta-pulta hua to bada model naya plan banayega, chhota hua to Gemini khud batayega", _log=False)
     user = "OLD TASK:\n%s\n\nWHAT WAS BUILT:\n%s\n\nCHAT:\n%s\n\nPHOTO TEXT:\n%s\n\nNEW MESSAGE FROM USER:\n%s" % (
         clip(re.split(r"\[ANDROID", old)[0], 1500), clip(built, 1200), recent_chat(8, 400) or "-", clip(img_txt, 2500) or "-", clip(task, 2500))
     txt, nm = small_gen(TRIAGE_SYS, user, 1500, TRIAGE_PREF, fast=True)
@@ -9991,7 +10173,7 @@ def triage(task):
     wrong = clip(str(d.get("wrong") or "").strip(), 300)
     if reply:
         ev("ai", text=reply, prov=nm)
-    ev("note", text="🧠 %s ne dekha: %s%s" % (nm, {"major": "bahut kuch galat (DSX naya plan banayega)", "minor": "chhoti dikkat (Gemini ne bataya, JAAT theek karega)",
+    ev("note", text="🧠 %s ne dekha: %s%s" % (nm, {"major": "bahut kuch galat (bada model naya plan banayega)", "minor": "chhoti dikkat (Gemini ne bataya, JAAT theek karega)",
                                                   "question": "sirf jaankari (Gemini ne khud bataya)"}.get(sev, sev), (" | bug: " + bug) if bug else ""), _log=False)
     if sev == "question":
         if not reply:
@@ -10079,7 +10261,7 @@ def pipe_front(task):
             return False
         if pipe_eligible(task):
             STATE["task"] = task
-            ev("note", text="🧭 bada kaam: DSX plan banayega, JAAT file-file ek saath likhega, aakhir me DSX poora project jaanchega")
+            ev("note", text=pipe_note())
             r = pipeline_entry(task)
             if STATE["cancel"]:
                 pipe_save()
