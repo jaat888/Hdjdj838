@@ -34,16 +34,21 @@ print("BOOT python=%s uid=%s DATA_DIR=%s PORT=%s" % (sys.version.split()[0], os.
 def _fatal_hook(et, val, tb):
     """Kuch bhi crash ho to app band hone ke bajay error screen par/log me dikhaye (taaki asli wajah pata chale)."""
     txt = "".join(traceback.format_exception(et, val, tb))
-    print("FATAL STARTUP ERROR:\n" + txt, flush=True)
+    diag = hashlib.sha256((txt + str(time.time())).encode("utf-8", "replace")).hexdigest()[:10]
+    print("FATAL STARTUP ERROR (diagnostic id %s):\n%s" % (diag, txt), flush=True)    # poora traceback sirf server log me
     try:
         class _H(BaseHTTPRequestHandler):
-            def do_GET(self):
-                b = ("FATAL STARTUP ERROR\n\n" + txt).encode("utf-8", "replace")
-                self.send_response(200)
+            def _fatal(self):
+                b = ("startup failed (diagnostic id %s). Server log dekho." % diag).encode("utf-8")
+                self.send_response(503)                              # uptime monitor ko 'healthy' mat dikhao
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
                 self.send_header("Content-Length", str(len(b)))
                 self.end_headers()
-                self.wfile.write(b)
+                if self.command != "HEAD":
+                    self.wfile.write(b)
+
+            do_GET = do_HEAD = do_POST = _fatal
 
             def log_message(self, *a):
                 pass
@@ -123,12 +128,28 @@ APIS = {
         "key": _env("NV2_KEY"),
         "models": ["nvidia/nemotron-3-ultra-550b-a55b", "poolside/laguna-xs-2.1"],
         "vision": "meta/llama-3.2-11b-vision-instruct",
+        "max_ctx": int(_env("NV2_CTX", "300000")),    # nemotron-3-ultra ka context 1M token hai; pehle 48000 char par hi kat jata tha
+        "max_conc": 3,                                # NVIDIA free API ki rate limit ke liye ek saath 3 tak
+        "rate_cool": 30,
     },
 }
 
 # ---- rev9.top, Gemini (GEM/GEM2/GEM3), DS, DAI, UAI -- ab sab yahan nahi, ye sab jaat-api gateway (JAAT) ke peeche
 # chale gaye hain. jaat-api worker khud in sab (+ 63 free model) me rotate karta hai, isliye yahan ek hi "JAAT" entry
 # rakhni hoti hai, aur sirf ek JAAT_KEY env me set karni hoti hai (blitz.cloud ke environment me).
+
+# ---- writer: jo model coding me sabse mazboot hai wo pehle likhe, JAAT uske baad (backup) ----
+# NV2 = nvidia/nemotron-3-ultra-550b (SWE-bench Verified ~72%, 1M ctx) -- Groq gpt-oss-120b se (~34-42%) kaafi aage.
+# WRITER_FIRST=JAAT (ya khaali) rakho to purana order (JAAT pehle). Key na ho ya NV2 band ho to apne aap agla chalta hai (avail() chhodta hai).
+WRITER_FIRST = _env("WRITER_FIRST", "NV2").strip().upper()
+
+
+def _writer_first(prefs):
+    prefs = tuple(prefs)
+    if WRITER_FIRST and WRITER_FIRST in prefs:
+        return (WRITER_FIRST,) + tuple(p for p in prefs if p != WRITER_FIRST)
+    return prefs
+
 
 # ---- bada jawab (token): JAAT (conf se badal sakte ho) ----
 for _n, _tok in (("JAAT", 10400),):   # JAAT ~10,600 token par kat jata hai
@@ -150,6 +171,7 @@ REPEAT_MAX = 15           # lagatar wahi command itni baar aaye tab kaam rokna (
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS") or 32000)         # AI ke jawab ki lambai (APIS me (19.py ke upar) cfg["max_tokens"] se badal sakte ho)
 RUN_TIMEOUT = 120         # @@RUN kitni der tak
 MAX_UPLOAD = 25 * 1024 * 1024
+MAX_JSON_BODY = int(_env("MAX_JSON_BODY", str(8 * 1024 * 1024)) or 8 * 1024 * 1024)   # JSON/chat request ka cap
 UA = "Mozilla/5.0 (Linux; Android 13; Mumbai) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
 BOOT = str(int(time.time() * 1000))
 ALLOWED_HOSTS = {h.strip() for h in (os.environ.get("ALLOWED_HOSTS") or "").split(",") if h.strip()}
@@ -176,7 +198,7 @@ os.makedirs(os.path.join(WORK, "uploads"), exist_ok=True)
 
 # ---------- login: password + 50 galat par 1 din ka lock ----------
 PASSWORD = _env("MUMBAI_PASSWORD", "8888")
-MAX_TRIES, LOCK_SECS = 50, 24 * 3600
+MAX_TRIES, LOCK_SECS = int(_env("MAX_TRIES", "300") or 300), 24 * 3600     # global emergency ceiling; asli roktham per-IP hai
 AUTH_TOKEN = hmac.new(("mumbai|" + _env("SESSION_SECRET", PASSWORD)).encode(), b"session", hashlib.sha256).hexdigest()
 AUTH_FILE = os.path.join(ROOT, ".mumbai", "auth.json")
 AUTH = {"fails": 0, "until": 0.0}
@@ -192,11 +214,28 @@ def auth_load():
         pass
 
 
+def private_write(path, text):
+    """Secret/state file: private folder 0700, file 0600, atomic replace."""
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def auth_save():
     try:
-        with open(AUTH_FILE + ".tmp", "w", encoding="utf-8") as f:
-            json.dump(AUTH, f)
-        os.replace(AUTH_FILE + ".tmp", AUTH_FILE)
+        private_write(AUTH_FILE, json.dumps(AUTH))
     except OSError:
         pass
 
@@ -394,10 +433,34 @@ def guest_del(gid):
         guests_save()
 
 
-def check_login(pw):
-    """(role, gid, msg): role 'owner' / 'guest' / None. Galat par ginti badhti hai (check_password jaisa lock)."""
+IP_FAILS = {}                       # ip -> [fail_count, locked_until, lock_level]
+IP_MAX_TRIES = int(_env("IP_MAX_TRIES", "10") or 10)
+
+
+def _ip_left(ip):
+    d = IP_FAILS.get(ip)
+    return int(d[1] - time.time()) + 1 if d and d[1] > time.time() else 0
+
+
+def _ip_fail(ip):
+    if len(IP_FAILS) > 5000:
+        IP_FAILS.clear()
+    d = IP_FAILS.setdefault(ip, [0, 0.0, 0])
+    d[0] += 1
+    if d[0] >= IP_MAX_TRIES:                                   # har lock par doguna, max 24 ghante
+        d[1] = time.time() + min(24 * 3600, 300 * (2 ** d[2]))
+        d[0], d[2] = 0, d[2] + 1
+        log("login throttle: ip %s lock %ds" % (ip, int(d[1] - time.time())))
+
+
+def check_login(pw, ip=None):
+    """(role, gid, msg): role 'owner' / 'guest' / None. Pehle per-IP throttle (ek galat client dusron ko lock nahi karta); global lock sirf emergency ceiling."""
     pw = str(pw)
     with AUTH_LOCK:
+        if ip:
+            lt = _ip_left(ip)
+            if lt:
+                return None, None, "⏳ is device se bahut galat try hue, %d min baad koshish karo" % (lt // 60 + 1)
         left = auth_locked()
         if left:
             return None, None, "🔒 lock hai, %d ghante %d min baad koshish karo" % (left // 3600, left % 3600 // 60)
@@ -412,7 +475,11 @@ def check_login(pw):
             if AUTH["fails"]:
                 AUTH["fails"] = 0
                 auth_save()
+            if ip:
+                IP_FAILS.pop(ip, None)
             return role, gid, ""
+        if ip:
+            _ip_fail(ip)
         AUTH["fails"] += 1
         if AUTH["fails"] >= MAX_TRIES:
             AUTH["until"] = time.time() + LOCK_SECS
@@ -472,7 +539,14 @@ Document (PDF/docx/xlsx): seedha @@WRITE file.pdf me asli content (# heading, ##
 Udaharan:
 - light: user "is note ka 1 page PDF banao" -> @@WRITE note.pdf ... -> @@LOOK note.pdf -> @@DONE note.pdf bana. D1: LOOK me 1 page, margin theek. D2: heading text me dikha.
 - code: user "telegram bot jo /start par hello bole" -> @@SPEC (S1 /start par hello, S2 galat command par help, S3 token na ho to saaf error) -> @@PLAN (bot.py, config, README) -> kadam-kadam -> @@RUN python -m py_compile bot.py -> @@DONE.
-- galti: reviewer kehta hai 'token khaali par crash' -> @@EDIT se check jodo -> @@LEARN token ya config khaali ho to crash nahi, saaf message -> aage badho."""
+- galti: reviewer kehta hai 'token khaali par crash' -> @@EDIT se check jodo -> @@LEARN token ya config khaali ho to crash nahi, saaf message -> aage badho.
+ASLI DIMAG (in niyamon ko hamesha follow karo):
+1. SENIOR DOST LEHJA: Robotic translation mat bolo. Ekdum natural Hinglish bolo jaise do Indian developers baat karte hain -- technical terms (API, state, deploy, function, bug) English me rakho. Baat chhoti, seedhi aur confident rakho.
+2. PRE-MORTEM: Har bada kadam (WRITE/EDIT/RUN se pehle) uthane se pehle apne andar (jawab me mat likho) 3 cheezein pakki karo: Asli Maqsad (user ko end me kya chalta hua dikhna chahiye), Break Point (khaali input, galat file, ya slow internet par ye code kahan toote-ga), Naksha Match (jo function/id/route naam file me hain, wahi exact spelling use ho rahi hai).
+3. CRAFTSMANSHIP (NO DEMO CODE): Jo banao, poora aur asli product jaisa banao. UI ho to mobile-friendly responsive layout, clean spacing, loading/error/empty states aur achhe colors hon. Code me kabhi '// ... baaki code' ya TODO mat chhodo.
+4. SURGICAL EDIT: Purani file me hamesha @@EDIT lagao. SEARCH block me badlav wali line ke upar-neeche ki 2-3 lines (jaise def/class line) zaroor rakho taaki match 100% pehli baar me chale.
+5. SMOKE-TEST SABOOT: Sirf syntax check (py_compile / node --check) kaafi nahi. Code likhne ke baad @@RUN se ek chhota real test chalao jo main function/handler ko dummy input dekar check kare ki woh bina crash hue sahi output de raha hai.
+6. SMART MEMORY: @@NOTE me ye mat likho ki 'kaunsi file banayi' -- balki ye likho ki 'kya contract/port/key format tay kiya'. Aur koi environment ya library ki nayi galti pakdo to @@LEARN me likho taaki agle har project me yaad rahe."""
 
 SYSTEM_MINI = """Tum Mumbai ho, coding assistant. Hinglish me chhota bolo. Sirf baat/sawal ho to seedha jawab do. Kaam ho to commands (har command nayi line par @@ se):
 @@WRITE <file>  (content, aakhir me @@END alag line par)
@@ -482,11 +556,33 @@ HAR MODEL KO FILE ACCESS HAI: @@TREE, @@LS, @@GREP, @@READ, @@UNZIP aur @@LOOK s
 Neeche PLAN dikhe to ek-ek kadam karo, har kadam ke baad @@CHECK n. Saare kadam ✅ hone par hi @@DONE.
 @@DONE akela likho, @@VERIFY/RUN ka natija dekh ke. Test/build kadam @@VERIFY saaf aane par hi @@CHECK. Chhoti chhoti files likho. Ek reply me sirf EK command do aur uska natija dekh ke hi agla do. Jo file ka hissa padh chuke ho use dobara mat padho; natija kata ho to agli line range padho."""
 
-STATE = {"running": False, "cancel": False, "msgs": [], "step": 0, "prov": "", "plan_items": [],
-         "plan_ck": [], "worklog": [], "task": "", "proj": "main", "pending": [], "proc": None}
+class AttrDict(dict):
+    """Dict jo .attribute se bhi aur ["key"] se bhi access ho (dono ek jaise kaam karte).
+    STATE/TRACK/PIPE_ST ke liye: purana STATE["running"] syntax bilkul waisa hi chalta hai
+    (dict hi hai, json.dumps/.setdefault/.clear/.pop/in sab kaam karte hain), aur naya
+    STATE.running bhi likh sakte ho. Koi behavior nahi badla, sirf access ka ek extra tareeka hai."""
+
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(key)
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+    def __delattr__(self, key):
+        try:
+            del self[key]
+        except KeyError:
+            raise AttributeError(key)
+
+
+STATE = AttrDict(running=False, cancel=False, msgs=[], step=0, prov="", plan_items=[],
+                  plan_ck=[], worklog=[], task="", proj="main", pending=[], proc=None)
 READ_FIRST, AUTO_CHECK, REVIEW = True, True, True
 REVIEW_MAX, REVIEW_MIN_LINES = 3, 80
-TRACK = {}
+TRACK = AttrDict()
 
 
 def track_reset():
@@ -508,9 +604,16 @@ EV, NEXT, LOCK, START = [], [0], threading.Lock(), threading.Lock()
 
 BODY_KINDS = ("WRITE", "WRITEB64", "EDIT", "PLAN", "SPEC")
 CTL = ("DONE", "PLAN", "CHECK", "NOTE", "SPEC", "LEARN", "ASK")
+_ENV_ALLOW = re.compile(r"^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|TZ|TERM|TMPDIR|TEMP|TMP|PREFIX|PWD|VIRTUAL_ENV|NODE_PATH|NODE_OPTIONS|"
+                        r"JAVA_HOME|ANDROID_HOME|ANDROID_SDK_ROOT|GOPATH|GOROOT|CARGO_HOME|RUSTUP_HOME|PYTHON[A-Z_]*|PIP_[A-Z_]*|LC_[A-Z_]+|npm_config_[a-z_]+|"
+                        r"CI|NO_COLOR|DEBIAN_FRONTEND|LD_LIBRARY_PATH)$")
+_ENV_NEVER = re.compile(r"KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|AUTH|DATABASE_URL|_DSN|PRIVATE|SESSION", re.I)
+
+
 def _clean_env():
-    """@@RUN wale shell ko keys/password mat dikhao (warna AI printenv se padh ke chat me daal deta)."""
-    return {k: v for k, v in os.environ.items() if not re.search(r"(KEY|PASSWORD|SECRET|TOKEN)$", k, re.I)}
+    """@@RUN wale shell ko ALLOWLIST wala environment: sirf PATH/HOME/locale/runtime flags + CHILD_ENV_ALLOW (comma list) ke naam. Baaki (DATABASE_URL, AWS_*, custom keys) kabhi nahi."""
+    extra = {x.strip() for x in _env("CHILD_ENV_ALLOW", "").split(",") if x.strip()}
+    return {k: v for k, v in os.environ.items() if (_ENV_ALLOW.match(k) or k in extra) and not (_ENV_NEVER.search(k) and k not in extra)}
 
 
 ENV = dict(_clean_env(), CI="1", npm_config_yes="true", PIP_NO_INPUT="1", DEBIAN_FRONTEND="noninteractive",
@@ -1233,7 +1336,7 @@ def ask_oai(name, cfg, msgs):
         for _ in range(8):
             if STATE["cancel"]:
                 return None
-            body = {"messages": fit(msgs, budget), "temperature": 0.2}
+            body = {"messages": fit(msgs, budget), "temperature": STATE.pop("temp_once", None) or 0.2}
             log("→ %s/%s ~%d char" % (name, model, sum(len(x.get("content") or "") for x in body["messages"])))
             if use_mt:
                 body["max_tokens"] = mt
@@ -1940,50 +2043,156 @@ def _strip_tags(t):
     return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", t or ""))).strip()
 
 
-def do_search(q):
-    q = q.strip()
-    if not q:
-        return "ERROR: @@SEARCH <kya dhundhna hai>", False, False, None
-    res = []
-    bk = _env("BRAVE_KEY")
-    if bk:                                   # Brave Search API (free plan), sabse bharosemand
-        req = urllib.request.Request("https://api.search.brave.com/res/v1/web/search?" + urllib.parse.urlencode({"q": q, "count": 8}),
-                                     headers={"Accept": "application/json", "X-Subscription-Token": bk, "User-Agent": UA})
-        def _brave(dead):
-            with urllib.request.urlopen(req, timeout=25) as r:
-                return json.loads(r.read().decode("utf-8", "replace"))
-        try:
-            j = cancellable(_brave)
-        except Cancelled:
-            return "⏹ roka gaya", False, False, None
-        for x in (j.get("web") or {}).get("results", [])[:8]:
-            res.append((_strip_tags(x.get("title")), x.get("url", ""), _strip_tags(x.get("description"))))
-    else:                                    # bina key: DuckDuckGo ka html page
+SEARCH_LAST = {"status": "not_attempted", "query": "", "retrieved_at": "", "n": 0, "provider": "", "detail": ""}
+SEARCH_CACHE = {}                         # (provider-agnostic) normalized query -> (time, result tuple)
+SEARCH_COOL = {}                          # provider -> time tak band (429/403/captcha ke baad)
+SEARCH_TTL = int(_env("SEARCH_TTL", "300") or 300)
+EVIDENCE = []                             # asli hui cheezon ka khata (search/test): model likh nahi sakta, sirf code bharta hai
+
+
+def ledger(kind, **kw):
+    """Evidence ledger me ek asli event likho (search/test/read). Kabhi bhi model se nahi, sirf code se."""
+    EVIDENCE.append(dict(kind=kind, t=time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime()), **kw))
+    del EVIDENCE[:-200]
+
+
+def ledger_text(kinds=("search",), n=6):
+    rows = [e for e in EVIDENCE if e["kind"] in kinds][-n:]
+    if not rows:
+        return "no live search was performed in this run"
+    return "; ".join("%s q=%r status=%s results=%s" % (e["t"], clip(e.get("query", ""), 60), e.get("status"), e.get("n", "")) for e in rows)
+
+
+def _norm_url(u):
+    """Sirf http/https, tracking hata ke; baaki sab ('' = chhodo)."""
+    try:
+        p = urllib.parse.urlsplit((u or "").strip())
+    except Exception:
+        return ""
+    if p.scheme not in ("http", "https") or not p.netloc:
+        return ""
+    q = [(k, v) for k, v in urllib.parse.parse_qsl(p.query, keep_blank_values=True) if not k.lower().startswith(("utm_", "fbclid", "gclid"))]
+    return urllib.parse.urlunsplit((p.scheme, p.netloc, p.path, urllib.parse.urlencode(q), ""))
+
+
+def _search_status(status, q, n=0, provider="", detail=""):
+    SEARCH_LAST.update(status=status, query=q, retrieved_at=time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime()), n=n, provider=provider, detail=detail)
+    ledger("search", query=q, status=status, n=n, provider=provider)
+
+
+def _search_provider(kind, q):
+    """-> (results, status, detail). status: success|no_results|rate_limited|blocked|timeout|http_error|parse_error"""
+    try:
+        if kind == "brave":
+            req = urllib.request.Request("https://api.search.brave.com/res/v1/web/search?" + urllib.parse.urlencode({"q": q, "count": 8}),
+                                         headers={"Accept": "application/json", "X-Subscription-Token": _env("BRAVE_KEY"), "User-Agent": UA})
+            def _go(dead):
+                with urllib.request.urlopen(req, timeout=25) as r:
+                    return json.loads(r.read(2000000).decode("utf-8", "replace"))
+            j = cancellable(_go)
+            res = [(_strip_tags(x.get("title")), x.get("url", ""), _strip_tags(x.get("description")))
+                   for x in ((j.get("web") or {}).get("results") or [])[:10]]
+            return res, ("success" if res else "no_results"), ""
         req = urllib.request.Request("https://html.duckduckgo.com/html/", urllib.parse.urlencode({"q": q}).encode(),
                                      {"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded"})
-        def _ddg(dead):
+        def _go(dead):
             with urllib.request.urlopen(req, timeout=25) as r:
                 return r.read(1500000).decode("utf-8", "replace")
-        try:
-            page = cancellable(_ddg)
-        except Cancelled:
-            return "⏹ roka gaya", False, False, None
+        page = cancellable(_go)
         links = [(m.group(0), m.end()) for m in re.finditer(r"<a\b[^>]*result__a[^>]*>.*?</a>", page, re.S)]
-        for i, (a, end) in enumerate(links[:8]):
-            h = re.search(r'href="([^"]+)"', a)
+        res = []
+        for i, (a_, end) in enumerate(links[:10]):
+            h = re.search(r'href="([^"]+)"', a_)
             url = html.unescape(h.group(1)) if h else ""
+            if url.startswith("//"):
+                url = "https:" + url
             u = re.search(r"uddg=([^&]+)", url)
             if u:
                 url = urllib.parse.unquote(u.group(1))
             nxt = links[i + 1][1] if i + 1 < len(links) else len(page)
             sn = re.search(r"result__snippet[^>]*>(.*?)</(?:a|td|div)>", page[end:nxt], re.S)
-            res.append((_strip_tags(a), url, _strip_tags(sn.group(1)) if sn else ""))
-        if not res and re.search(r"anomaly|captcha|blocked", page, re.I):
-            return "ERROR: DuckDuckGo ne roka (bahut request). Thodi der baad, ya BRAVE_KEY environment me daalo", False, False, None
-    if not res:
-        return "(kuch nahi mila)", False, True, None
-    return "\n\n".join("%d. %s\n%s\n%s" % (i, t, u, sn[:250]) for i, (t, u, sn) in enumerate(res, 1)) + \
-        "\n\n(kisi link ka poora text padhne ko @@WEB <link>)", False, True, None
+            res.append((_strip_tags(a_), url, _strip_tags(sn.group(1)) if sn else ""))
+        if not res:
+            if re.search(r"anomaly|captcha|blocked|unusual traffic", page, re.I):
+                return [], "blocked", "DuckDuckGo ne roka"
+            return [], ("parse_error" if len(page) > 5000 and "result" in page else "no_results"), ""
+        return res, "success", ""
+    except Cancelled:
+        raise
+    except urllib.error.HTTPError as e:
+        return [], ("rate_limited" if e.code == 429 else "blocked" if e.code in (401, 403) else "http_error"), "HTTP %s" % e.code
+    except (socket.timeout, TimeoutError):
+        return [], "timeout", "timeout"
+    except urllib.error.URLError as e:
+        return [], ("timeout" if "timed out" in str(e.reason) else "http_error"), str(e.reason)[:80]
+    except (ValueError, KeyError, AttributeError) as e:
+        return [], "parse_error", str(e)[:80]
+    except Exception as e:
+        return [], "http_error", str(e)[:80]
+
+
+def do_search(q):
+    """(text, False, ok, None). ok sirf tab True jab asli results mile. Text 'ERROR'/'⏹' se shuru = fail. Har koshish ledger me darj hoti hai."""
+    q = (q or "").strip()
+    if not q:
+        return "ERROR: @@SEARCH <kya dhundhna hai>", False, False, None
+    key = re.sub(r"\s+", " ", q.lower())
+    hit = SEARCH_CACHE.get(key)
+    if hit and time.time() - hit[0] < SEARCH_TTL and not re.search(r"\b(?:refresh|breaking)\b", q, re.I):
+        return hit[1]
+    kinds = (["brave"] if _env("BRAVE_KEY") else []) + ["ddg"]
+    res, status, detail, used = [], "no_results", "", ""
+    for kind in kinds:
+        if SEARCH_COOL.get(kind, 0) > time.time():
+            status, detail = "rate_limited", "%s abhi cooldown me" % kind
+            continue
+        try:
+            res, status, detail = _search_provider(kind, q)
+            if status in ("rate_limited", "http_error") and not STATE["cancel"]:
+                time.sleep(2)                                # ek baar chhota backoff, phir dobara
+                res, status, detail = _search_provider(kind, q)
+        except Cancelled:
+            return "⏹ roka gaya", False, False, None
+        used = kind
+        if status in ("rate_limited", "blocked"):
+            SEARCH_COOL[kind] = time.time() + 120
+        if res:
+            break
+    seen, out = set(), []
+    for t, u, sn in res:
+        u = _norm_url(u)
+        k = re.sub(r"^https?://(?:www\.)?", "", u).rstrip("/").lower()
+        if u and k not in seen:
+            seen.add(k)
+            out.append((t, u, sn))
+    if not out:
+        _search_status(status if status != "success" else "no_results", q, 0, used, detail)
+        if status in ("no_results", "success"):
+            r = ("(kuch nahi mila)", False, True, None)
+            return r
+        return "ERROR: search nahi chala (%s%s). Live jaankari verify NAHI hui." % (status, (": " + detail) if detail else ""), False, False, None
+    _search_status("success", q, len(out), used)
+    r = ("\n\n".join("%d. %s\n%s\n%s" % (i, t, u, sn[:250]) for i, (t, u, sn) in enumerate(out[:8], 1)) +
+         "\n\n(snippet sirf sanket hain, saboot nahi. Poora text padhne ko @@WEB <link>)", False, True, None)
+    SEARCH_CACHE[key] = (time.time(), r)
+    if len(SEARCH_CACHE) > 60:
+        SEARCH_CACHE.pop(next(iter(SEARCH_CACHE)))
+    return r
+
+
+def search_evidence(q, limit=2500, label="SEARCH EVIDENCE"):
+    """Asli search karke model ke liye block. Fail ho to saaf 'verify nahi hua' likha block (kabhi khaali jhooth nahi)."""
+    try:
+        txt, _c, ok, _x = do_search(q)
+    except Exception as e:
+        log("search_evidence galti: %s" % e)
+        txt, ok = "ERROR: %s" % str(e)[:80], False
+    stamp = SEARCH_LAST.get("retrieved_at") or time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime())
+    if ok and txt and not str(txt).startswith(("ERROR", "⏹")) and not str(txt).startswith("(kuch nahi"):
+        body = clip(re.sub(r"\n\((?:snippet|kisi link).*$", "", str(txt), flags=re.S), limit)
+        return "\n\n%s (asli web search, query=%r, retrieved %s; snippets = sanket, saboot nahi):\n%s" % (label, clip(q, 100), stamp, body)
+    return "\n\n[%s: live search ki koshish hui par kaam nahi aaya (%s). Isliye taaza baaton ko 'live verify nahi hua' bol kar likho.]" % (
+        label, clip(str(txt), 120))
 
 
 def notify(text):
@@ -2112,7 +2321,7 @@ def parse(text):
         if not m:
             if not line.strip():
                 leaking = False
-            elif leaking or LEAK_RE.match(line):
+            elif LEAK_RE.match(line):                  # sirf wahi angrezi 'soch' wali line; poora paragraph nahi (asli jawab na kate)
                 leaking = True
                 dropped.append(line)
                 i += 1
@@ -2171,7 +2380,13 @@ def clip(s, n=3000):
     return s[:head] + "\n...(beech ka hissa kata gaya)...\n" + s[-(n - head):]
 
 
+_TL = threading.local()
+
+
 def snap(p):
+    rv = getattr(_TL, "revoked", None)
+    if rv is not None and rv.is_set():                           # timeout/cancel ho chuke worker ko likhne mat do
+        raise Cancelled()
     if not UNDO_STACK:
         return
     cur, rel = UNDO_STACK[-1], os.path.relpath(p, WORK)
@@ -2500,35 +2715,79 @@ def kill_bg():
             kill_group(j["p"])
 
 
+MAX_OUT_BYTES = int(_env("MAX_OUT_BYTES", str(8 * 1024 * 1024)) or 8 * 1024 * 1024)      # ek command ka output isse zyada nahi
+BG_MAX_JOBS = int(_env("BG_MAX_JOBS", "6") or 6)
+
+
+def _tail_text(f, n):
+    """File ke aakhri n bytes (poori file RAM me nahi)."""
+    size = os.fstat(f.fileno()).st_size
+    f.seek(max(0, size - n))
+    return f.read(n).decode("utf-8", "replace"), size
+
+
 def run_shell(cmd, timeout=RUN_TIMEOUT):
-    """(exit_code, output, kyun_roka: None/'timeout'/'cancel'). stdin band, timeout par bacche bhi maare jate hain."""
-    p = subprocess.Popen(cmd, shell=True, cwd=WORK, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    """(exit_code, output, kyun_roka: None/'timeout'/'cancel'/'output_cap'). stdin band; output disk file me, RAM me sirf aakhri hissa."""
+    import tempfile
+    of = tempfile.TemporaryFile()
+    p = subprocess.Popen(cmd, shell=True, cwd=WORK, stdin=subprocess.DEVNULL, stdout=of,
                          stderr=subprocess.STDOUT, env=ENV, start_new_session=True)
     STATE["proc"] = p
-    t0, why, out = time.time(), None, b""
+    t0, why = time.time(), None
     try:
         while True:
             try:
-                out, _ = p.communicate(timeout=0.5)
+                p.wait(timeout=0.5)
                 break
             except subprocess.TimeoutExpired:
                 if STATE["cancel"]:
                     why = "cancel"
                 elif time.time() - t0 > timeout:
                     why = "timeout"
+                elif os.fstat(of.fileno()).st_size > MAX_OUT_BYTES:
+                    why = "output_cap"
                 if why:
                     kill_group(p)
                     try:
-                        out, _ = p.communicate(timeout=5)
+                        p.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        out = b""
+                        pass
                     break
+        txt, size = _tail_text(of, min(MAX_OUT_BYTES, 400000))
+        if size > len(txt.encode("utf-8", "replace")):
+            txt = "[...output chhota kiya: kul %d bytes, aakhri hissa dikha raha hoon]\n%s" % (size, txt)
     finally:
         STATE["proc"] = None
-    return p.returncode, out.decode("utf-8", "replace"), why
+        of.close()
+    return p.returncode, txt, why
+
+
+def _bg_watch(jid):
+    """Background log ki size par nazar: cap paar ho to job band, aakhri note likho."""
+    j = BG.get(jid)
+    while j and j["p"].poll() is None:
+        time.sleep(2)
+        try:
+            if os.path.getsize(j["log"]) > MAX_OUT_BYTES:
+                kill_group(j["p"])
+                with open(j["log"], "ab") as f:
+                    f.write(("\n[Mumbai: output %d bytes se zyada tha, job band kiya]\n" % MAX_OUT_BYTES).encode())
+                break
+        except OSError:
+            break
 
 
 def bg_start(cmd):
+    running = [k for k, v in BG.items() if v["p"].poll() is None]
+    while len(running) >= BG_MAX_JOBS:                       # sabse purana job band, naya chalao
+        old = running.pop(0)
+        kill_group(BG[old]["p"])
+    for k in [k for k, v in BG.items() if v["p"].poll() is not None][:-20]:      # purane khatam jobs ke log saaf
+        try:
+            os.remove(BG[k]["log"])
+        except OSError:
+            pass
+        BG.pop(k, None)
     BG_N[0] += 1
     jid = "b%d" % BG_N[0]
     os.makedirs(os.path.join(WORK, ".bg"), exist_ok=True)
@@ -2538,6 +2797,7 @@ def bg_start(cmd):
                          env=ENV, start_new_session=True)
     lf.close()
     BG[jid] = {"p": p, "cmd": cmd, "log": path}
+    threading.Thread(target=_bg_watch, args=(jid,), daemon=True).start()
     return jid
 
 
@@ -2548,9 +2808,9 @@ def bg_status(jid, n=3000):
     code = j["p"].poll()
     try:
         with open(j["log"], "rb") as f:
-            txt = f.read().decode("utf-8", "replace")
+            txt, size = _tail_text(f, max(n * 4, 4000))                # poori log nahi, sirf aakhri hissa
     except OSError:
-        txt = ""
+        txt, size = "", 0
     st = "chal raha hai" if code is None else "khatam, exit %d" % code
     return "[%s] %s\ncmd: %s\n%s" % (jid, st, j["cmd"][:100], clip(txt, n) or "(abhi output nahi)")
 
@@ -3912,7 +4172,7 @@ def _final_gate_core():
     for line in TRACK["spec"]:
         sid = line.split(":", 1)[0]
         vs = [sp.get(sid) for sp in per]
-        good = [v for v in vs if v and str(v.get("evidence", "")).strip() and (v.get("pass") is True or phantom(v.get("evidence")))]
+        good = [v for v in vs if v and str(v.get("evidence", "")).strip() and v.get("pass") is True and not phantom(v.get("evidence"))]
         if len(good) == len(vs):                       # jitne reviewer bole, sab ne pass kiya
             proof[sid] = str(good[0]["evidence"])[:200]
         else:
@@ -4264,6 +4524,18 @@ def gradle_gate(k, a):
     return None
 
 
+BIG_BODY_LINES = int(_env("BIG_BODY_LINES", "1000") or 1000)       # bade-output wale model (DSX/Groq/NVIDIA) ke liye ek @@WRITE ki hadd
+
+
+def body_line_cap(rel):
+    """Jis AI ne abhi jawab diya uske max_tokens se hadd: ~13 token/line, 25% margin. JAAT (~10.4k token) = 600 hi rehta hai (usse bada jawab kat jata hai)."""
+    if rel.lower().endswith(DOC_BODY_EXT):
+        return DOC_BODY_LINES
+    cfg = APIS.get(STATE.get("prov") or "") or {}
+    mt = min(int(cfg.get("max_tokens") or MAX_TOKENS), LEARN_MT.get(STATE.get("prov") or "", 10 ** 9))
+    return max(MAX_BODY_LINES, min(BIG_BODY_LINES, int(mt * 0.75 / 13)))
+
+
 def size_gate(k, a, body):
     """Ek @@WRITE/@@EDIT ki line hadd (MAX_BODY_LINES) se zyada par roko, alag files me todne ko kaho."""
     if k not in ("WRITE", "EDIT"):
@@ -4272,7 +4544,7 @@ def size_gate(k, a, body):
     if not rel or rel in (SPEC_FILE, "PROJECT.md"):
         return None
     n = len([l for l in (body or "").split("\n") if l.strip()])
-    lim = DOC_BODY_LINES if rel.lower().endswith(DOC_BODY_EXT) else MAX_BODY_LINES
+    lim = body_line_cap(rel)
     if n <= lim or TRACK["size_rej"].get(rel, 0) >= BODY_REJECT_MAX:
         return None
     TRACK["size_rej"][rel] = TRACK["size_rej"].get(rel, 0) + 1
@@ -4516,9 +4788,15 @@ def wl(line):
 
 def trim():
     m = STATE["msgs"]
-    for x in m[1:-8]:                       # purane bade messages chhote karo (file to disk par hai)
+    reads = [i for i, x in enumerate(m) if x.get("role") == "user" and isinstance(x.get("content"), str)
+             and x["content"].startswith("Natija:") and "[READ " in x["content"]]
+    keep = set(reads[-3:])                  # pichle 3 @@READ natije poore (agle kuch steps ke edits inhi par tikte hain)
+    for i, x in enumerate(m[1:-8], 1):      # purane bade messages chhote karo (file to disk par hai)
         c = x.get("content")
-        if isinstance(c, str) and len(c) > 1500:
+        if i in keep:
+            if isinstance(c, str) and len(c) > 14000:
+                x["content"] = c[:9000] + "\n...(beech ka hissa kata gaya)...\n" + c[-3500:]
+        elif isinstance(c, str) and len(c) > 1500:
             x["content"] = c[:800] + "\n...(purana hissa kata gaya)...\n" + c[-400:]
     if len(m) > 30:
         first = next((x for x in m[1:] if x["role"] == "user"), None)
@@ -4537,9 +4815,7 @@ def save_state():
              "worklog": STATE["worklog"], "task": STATE["task"],
              "utype": STATE.get("utype", ""), "goal": STATE.get("goal", ""), "criteria": STATE.get("criteria", [])}
         path = os.path.join(ROOT, ".mumbai", STATE["proj"] + ".json")
-        with open(path + ".tmp", "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False)
-        os.replace(path + ".tmp", path)
+        private_write(path, json.dumps(d, ensure_ascii=False))
     except Exception as e:
         log("state save fail: %s" % e)
 
@@ -4867,10 +5143,14 @@ def run_agent(task):
             continue
         if repeat >= 3 and repeat % 3 == 0:
             # wahi command dohra raha hai: is AI ko kuch der ke liye hatao, agla AI wahi kadam kare
-            penalize(name, 300)
-            ev("note", text="🔁 %s wahi command dohra raha tha (%d baar), ab agle AI se kara raha hoon" % (name, repeat))
-            add("user", "[Mumbai: pichhle AI ne wahi command dohraya. Natija pehle hi upar hai, use dekh ke ISI kadam ka agla hissa karo. "
-                        "Wahi command mat dohrao; file ka kata hissa chahiye to chhoti line range padho.]")
+            if repeat >= 6:                                  # sach me atka ho tabhi AI badlo, aur chhote lock se
+                penalize(name, 60)
+                ev("note", text="🔁 %s wahi command %d baar dohra chuka, ab agle AI se kara raha hoon" % (name, repeat))
+            else:
+                ev("note", text="🔁 %s ne wahi command dohraya (%d baar); usi AI ko naya tareeka sujha raha hoon" % (name, repeat))
+            STATE["temp_once"] = 0.5                         # is ek call ke liye thoda zyada khula, taaki wahi loop na dohraye
+            add("user", "[Mumbai: tumne wahi command dohraya. Natija pehle hi upar hai. Ruko: <think> me soch lo ki pichhla tareeka kyun nahi chala, "
+                        "phir bilkul alag tareeka lo (chhoti line range, @@GREP, ya file chhoti ho to poori @@WRITE). Wahi command mat dohrao.]")
             save_state()
             continue
         has_action = any(k not in CTL for k, _, _, _ in cmds)
@@ -5043,6 +5323,12 @@ def run_agent(task):
                             res += "\n" + extra
                     elif k == "EDIT":
                         TRACK["edit_fail"][rel] = TRACK["edit_fail"].get(rel, 0) + 1
+                        try:                                  # alag @@READ ka step bachao: asli lines isi natije ke saath
+                            if "[Asli code" not in res and os.path.isfile(safe(rel)):
+                                res += "\n[Asli code (ise dekh ke SEARCH bilkul waisa copy karke @@EDIT dobara do, @@READ ki zaroorat nahi)]\n" + clip(excerpt_for(rel, body), 6000)
+                                TRACK["seen"].add(rel)
+                        except Exception as e:
+                            log("edit excerpt galti: %s" % e)
                         if TRACK["edit_fail"][rel] >= 3:
                             res += "\n[Note] Is file par 3 baar EDIT fail hua. Naya tareeka socho: @@READ se file dobara dekho ya chhoti file ho to @@WRITE."
                 elif k == "RUN" and not ok:
@@ -5683,11 +5969,37 @@ def selftest():
         STATE["running"] = False
 
 
+SECRET_FILE_RE = re.compile(r"(^|/)(\.env(\..*)?|\.npmrc|\.pypirc|\.netrc|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|.*\.(pem|key|p12|pfx|jks|keystore|kdbx)|"
+                            r"service[-_]?account.*\.json|.*credentials?.*\.json|.*secrets?.*\.(json|ya?ml|toml)|.*\.(sqlite3?|db|dump|sql\.gz))$", re.I)
+EXPORT_SKIPPED = []
+
+
+def is_exportable_file(rel):
+    """(ok, wajah). Secret/key/DB/symlink/workspace ke bahar wali cheez ZIP me nahi."""
+    if SECRET_FILE_RE.search(rel.replace(os.sep, "/")):
+        return False, "secret/key/db jaisi file"
+    p = os.path.join(WORK, rel)
+    try:
+        if os.path.islink(p):
+            return False, "symlink"
+        real, root = os.path.realpath(p), os.path.realpath(WORK)
+        if real != root and not real.startswith(root + os.sep):
+            return False, "workspace ke bahar"
+    except OSError:
+        return False, "padh nahi sakte"
+    return True, ""
+
+
 def zip_files(skip=None):
-    """Zip me kya jayega: PROJECT.md, uploads/ aur purani .zip files nahi."""
+    """Zip me kya jayega: PROJECT.md, uploads/, purani .zip, secret/key/DB files aur symlink nahi (EXPORT_SKIPPED me wajah milti hai)."""
     out = []
+    del EXPORT_SKIPPED[:]
     for f in list_files(None):
         if (skip and f in skip) or f in ("PROJECT.md", "SPEC.md") or f.split(os.sep, 1)[0] == "uploads" or f.lower().endswith(".zip"):
+            continue
+        ok, why = is_exportable_file(f)
+        if not ok:
+            EXPORT_SKIPPED.append("%s (%s)" % (f, why))
             continue
         out.append(f)
     return out
@@ -6224,6 +6536,15 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _ip(self):
+        """Client IP. X-Forwarded-For sirf TRUST_PROXY=1 (apne reverse proxy ke peeche) par maana jata hai."""
+        ip = (self.client_address or ("?",))[0]
+        if _env("TRUST_PROXY") == "1":
+            f = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+            if f:
+                ip = f
+        return ip
+
     def _guard(self, post=False):
         """Dusri website se chhupke aayi request ko rokta hai (Origin/Host jaanch)."""
         host = self.headers.get("Host", "")
@@ -6261,7 +6582,7 @@ class H(BaseHTTPRequestHandler):
                     return True
         h = self.headers.get("Authorization") or ""
         if h.startswith("Bearer "):
-            role, gid, _ = check_login(h[7:].strip())
+            role, gid, _ = check_login(h[7:].strip(), self._ip())
             if role:
                 self.role, self.gid = role, gid
                 return True
@@ -6377,14 +6698,21 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._guard(True):
             return
-        n = int(self.headers.get("Content-Length") or 0)
+        raw_n = (self.headers.get("Content-Length") or "").strip()
+        if raw_n and not raw_n.isdigit():
+            return self._send(400, '{"error":{"message":"Content-Length galat"}}')
+        n = int(raw_n or 0)
         u = urllib.parse.urlparse(self.path)
+        _cap = MAX_UPLOAD if u.path == "/upload" else MAX_JSON_BODY
+        if n > _cap:                                             # body padhne se PEHLE hi mana
+            self.close_connection = True
+            return self._send(413, '{"error":{"message":"request bahut badi"}}')
         if u.path == "/login":
             try:
                 lb = json.loads(self.rfile.read(min(n, 2048)) or b"{}")
             except ValueError:
                 lb = {}
-            role, gid, msg = check_login(lb.get("password", "") if isinstance(lb, dict) else "")
+            role, gid, msg = check_login(lb.get("password", "") if isinstance(lb, dict) else "", self._ip())
             if not role:
                 return self._send(403, json.dumps({"error": {"message": msg}}))
             secure = "; Secure" if self.headers.get("X-Forwarded-Proto") == "https" else ""
@@ -6772,7 +7100,7 @@ GEM_SCAN_MAX = 2                                    # Gemini ek kaam me bug-scan
 GEM_BUILD_STEPS = 3                                 # shuru ke itne kadam Gemini banaye, phir JAAT/Groq/DS
 PLAN_GAP_ROUNDS = 2
 MEMO_FILE = "MEMORY.md"
-CODE_WRITE_PREF = ("JAAT", "GROQ", "NV2", "DSX")
+CODE_WRITE_PREF = _writer_first(("JAAT", "GROQ", "NV2", "DSX"))
 CODE_PLAN_PREF = ("GROQ", "NV2", "DSX")
 # level -> (lines kam se kam, lines zyada se zyada, files)
 LEVEL_SCOPE = {1: (50, 100, 1), 2: (100, 200, 1), 3: (200, 400, 2), 4: (400, 700, 3), 5: (700, 1000, 4),
@@ -7302,8 +7630,18 @@ def file_memo(rel):
 _context_block_orig = context_block
 
 
+OUTLINE_ALWAYS = _env("OUTLINE_ALWAYS", "1") != "0"
+
+
 def context_block():
     base = _context_block_orig()
+    try:
+        if OUTLINE_ALWAYS and "FILES KA NAKSHA" not in base:        # SPEC ho ya na ho: har step par project ke functions/ids ka naksha
+            ol = outline(limit=3000)
+            if ol:
+                base += "\nFILES KA NAKSHA (kaun si file me kaun se function/class/id; naam isi se milao):\n" + ol
+    except Exception as e:
+        log("outline block galti: %s" % e)
     try:
         mem = memory_text(2500)
         if mem:
@@ -7399,7 +7737,7 @@ E. @@DONE ke saar me user se seedhi baat, saaf Hinglish me: kya bana, kaise chal
 F. Wahi banao jo user ne maanga, poora aur asli jaisa. Uske saath jo zaroori hisse hote hain (empty/error screen, settings ya about) theek hain; par doosra alag project ya bekaar extra feature mat banao.
 """
 if LEAN:
-    READ_FIRST, REVIEW = False, False                 # file dobara padhne ki zabardasti band
+    READ_FIRST, REVIEW = _env("READ_FIRST", "1") != "0", False        # Balanced: purani file ek baar dekhe bina blind badlav nahi (read_gate sirf ek baar roakta hai); READ_FIRST=0 se band
     SPEC_GATE = REVIEW_LOOP = False                   # reviewer / SPEC / aakhri review: extra AI calls band
     SCAN_ON_CHECK = CODE_FLOW = False                 # 2 AI examine + 3 AI plan + 4 AI scan band
     SPLIT_ROLES = False                               # likhna chhote model se nahi: JAAT pehle, phir Gemini
@@ -7411,6 +7749,20 @@ if LEAN:
     MAX_TOKENS = int(_env("MAX_TOKENS", "32000"))
     REPEAT_MAX, REPEAT_WAIT = 6, 60
     SYSTEM = SYSTEM.replace("120 line tak (.pdf/.docx/.md/.txt me 120)", "600 line tak") + NEW_RULES
+
+POWER_RULES = """
+SOCH KI TAAKAT (ye niyam sabse upar):
+1. Kaam shuru karne se pehle khud se 3 sawal: maqsad kya hai, sabse mushkil/risky hissa kya hai, kaise pata chalega ki sahi bana. Phir sabse mazboot raasta chuno, sabse aalsi nahi.
+2. Purani file badalne se pehle usse ek baar padho (agar is kaam me abhi tak nahi padhi; padhi hui file bina badlav dobara mat padho) aur @@GREP se dekho kaun use karta hai. Bug ho to pehle asli wajah pakdo (error ka asli output padho), symptom par patch mat lagao. Ek hi tareeka do baar fail ho to ruk ke naya angle socho.
+3. Banane ke baad chalao ya padh ke trace karo: normal input, khaali input, galat input. Jo chala nahi wo 'chala nahi' bolo; jo chala wo saboot ke saath bolo. Par jo tum jaante ho wo poore bharose se bolo.
+4. Kaam asli product jaisa chamakdar aur poora ho: achha layout, saaf message, error/empty states. Bas demo chhod ke mat jao.
+5. Taaza cheez (version, library, free limit) par bharosa karne se pehle @@SEARCH aur @@WEB se asli page dekho; snippet sirf sanket hai.
+"""
+POWER_RULES += """7. <think> chhota aur sirf kaam ki jagah: kaam ke pehle kadam par, aur jab koi command fail ho ya wahi cheez dohre, tab <think>...</think> me 2-4 line (80 shabd tak): abhi kahan hain, pichhle natije se kya pata chala, agla sabse chhota safe kadam. Har @@WRITE/@@EDIT se pehle lamba mat sochna (jawab ka token limit bada kaam khaa jata hai). <think> ko hamesha band karo (</think>) aur @@ command uske BAAD alag line par likho.
+"""
+POWER_RULES += """6. Agar niyam takrayein to ye kram: user ka asli kaam > [Mumbai: ...] se aaya taaza nudge/gate ka sandesh > chhote kaam ka FAST LANE note > baaki niyam. Kaam jitna chhota, utne kam kadam (rang badalna = @@GREP, @@READ, @@EDIT, @@RUN check).
+"""
+SYSTEM = SYSTEM + POWER_RULES
 
 _ask_user_prev, _do_understand_prev, _done_gate_prev = ask_user, do_understand, done_gate
 _scan_prev, _hook_prev = scan_dirty_files, review_hook
@@ -7555,13 +7907,13 @@ PLAN_SPLIT = _env("PLAN_SPLIT", "1") != "0"                         # 0 = bade p
 PIPE_OUT = int(_env("PIPE_OUT_TOKENS", "64000"))                    # plan / bug-list / exact-fix me jawab ki upari hadd (provider ki apni hadd se zyada nahi jaata)
 PLAN_PREF = ("NV2", "DSX")       # plan ka backup (GROQ plan se bahar); pehle plan_slots() ke JAAT reasoning models
 PLAN_TMO = int(_env("PLAN_TIMEOUT", "900"))   # plan ke liye kul intezaar (sec)
-WRITE_PREF = ("JAAT", "GROQ", "NV2", "DSX")  # JAAT primary coder, Haiku backup writer
-FIX_PREF = ("JAAT", "GROQ", "NV2", "DSX")  # JAAT/Haiku bug-fix team
+WRITE_PREF = _writer_first(("JAAT", "GROQ", "NV2", "DSX"))  # NV2 (nemotron-3-ultra) pehle, phir JAAT backup
+FIX_PREF = _writer_first(("JAAT", "GROQ", "NV2", "DSX"))  # bug-fix bhi mazboot writer se, JAAT backup
 CHECK_PREF = ("GROQ", "NV2")  # independent code checks
 FINAL_PREF = ("GROQ", "NV2", "DSX")         # final audit: architect/reviewers, not JAAT writer
 EXPLAIN_PREF = ("GROQ", "NV2")       # setup explanation, not JAAT
 CHAT_PREF = ("GROQ", "NV2")  # normal chat never JAAT
-PIPE_ST = {}                                                        # chalti pipeline ki halat (disk par .mumbai/pipe.json me bhi)
+PIPE_ST = AttrDict()                                                # chalti pipeline ki halat (disk par .mumbai/pipe.json me bhi)
 PIPE_LOCK = threading.RLock()
 CHECK_EXT = (".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".html", ".kt", ".java", ".go", ".rs", ".c", ".cpp", ".sh", ".css")
 CARD_EXT = CHECK_EXT + (".json", ".toml", ".yml", ".yaml", ".gradle", ".kts", ".xml")
@@ -7650,16 +8002,20 @@ def gen_call(nm, system, user, mt=None, tries=2, model=None, tmo=None):
 
 
 def par_run(fns, secs=1500):
-    """fns (bina argument wale function) ek saath chalao; [result ya None] unhi ke order me. Cancel/timeout par wahin se wapas."""
+    """fns (bina argument wale function) ek saath chalao; [result ya None] unhi ke order me. Cancel/timeout par revoke: baad me ye workers koi file nahi badal sakte (snap() Cancelled uthata hai)."""
     res = [None] * len(fns)
     gate = threading.Semaphore(8)
+    revoked = threading.Event()
 
     def work(i):
+        _TL.revoked = revoked
         with gate:
-            if STATE["cancel"]:
+            if STATE["cancel"] or revoked.is_set():
                 return
             try:
                 res[i] = fns[i]()
+            except Cancelled:
+                pass
             except Exception as e:
                 log("par_run %d: %s\n%s" % (i, e, traceback.format_exc()[-500:]))
     ths = [threading.Thread(target=work, args=(i,), daemon=True) for i in range(len(fns))]
@@ -7671,6 +8027,14 @@ def par_run(fns, secs=1500):
             break
         for t in ths:
             t.join(0.3)
+    if any(t.is_alive() for t in ths):
+        revoked.set()                                           # ab ye workers file nahi likh sakte
+        for t in ths:
+            t.join(2)
+        left = sum(1 for t in ths if t.is_alive())
+        if left:
+            PIPE_ST.setdefault("warn", []).append("%d worker timeout/cancel ke baad bhi chal raha hai (still_running/unknown); uske likhne par roak laga di gayi hai" % left)
+            log("par_run: %d worker still_running, revoked" % left)
     return res
 
 
@@ -8016,6 +8380,8 @@ def card_update(rel, ai=False):
 PLAN_SYS_PIPE = (
     "You are the lead architect of a software project. OTHER AI writers will write each file at the same time, ONE file per request, and they cannot see each other's files. "
     "The contract you write is the only thing they share, so a thin or vague plan gives files that do not fit together. "
+    "THINK FIRST (silently, then write the JSON): what does the user really need; what is the best-quality version of this that is still buildable in one pass; which 3 parts are riskiest or most complex; "
+    "how does data flow end to end; what happens on empty/invalid/failed input or network; which choices would force a rewrite later. Pick the strongest design, not the laziest one, and fix it in the contract. "
     "Reply with ONLY one JSON object, no prose, no code fence: "
     '{"design":"10-20 lines, the decisions you fix for the writers: (a) what the user wants and what finished looks like to them; (b) the whole user journey: every screen/page/endpoint, what it shows or does, how the user moves between them; '
     "(c) everything many files share (data shapes, storage keys, ids, routes, theme, helpers) in the exact form you fix; (d) the 3 hardest parts and how the plan makes them work; "
@@ -8024,7 +8390,7 @@ PLAN_SYS_PIPE = (
     '"files":[{"path":"main.py","purpose":"what this file does","group":1,"max_lines":300,"exports":["name(arg1, arg2) -> return type : meaning"],"imports":["other.py: nameA, nameB"]}],'
     '"commands":{"setup":["..."],"run":["..."],"deploy":["..."],"test":["..."]},"env":["NAME: where to get it"],"spec":["WHEN ... THEN ..."]}. '
     "RULES: "
-    "1) Plan what the task needs to work well and to feel finished to the user: real screens, real data flow, empty/loading/error states. Keep the user's own file names and folders. "
+    "1) Plan what the task needs to work well and to feel finished and polished to the user: real screens, real data flow, empty/loading/error states, sensible defaults, good layout and clear wording. Aim for what a strong senior developer would ship, not a bare demo. Keep the user's own file names and folders. "
     "BIG TASKS (many screens or features): split by screen/feature, each screen gets its own file(s) and purpose line, and shared things (config, constants, data layer, shared UI, theme) go in an early group. "
     "If the task needs a cloud account or keys the user may not have yet, make the app work first with local storage and sample data, keep the cloud part behind ONE data-layer file, and say in notes which data is local. "
     "2) One writer produces at most MAXL lines per file (about 10k tokens), so set a realistic max_lines per file and split bigger features into modules. "
@@ -8356,12 +8722,23 @@ def expand_modules(user, dd, bp, first):
     return bp2, d2
 
 
+PLAN_SEARCH = _env("PLAN_SEARCH", "1") != "0"                       # 0 = planner ko search evidence mat do
+
+
+def plan_research(task):
+    """Planner ke liye ek asli search (versions/hosting). Fail ho to planner ko saaf 'verify nahi' note milta hai."""
+    t = re.sub(r"\[(?:User ke jawab|ANDROID).*$", "", task or "", flags=re.S).strip()
+    return search_evidence("%s stack setup free hosting %s" % (clip(t, 90), time.strftime("%Y")), 2200, "SEARCH EVIDENCE for planning")
+
+
 def make_blueprint(task):
     """(bp, provider) ya (None, ''). Bada reasoning model plan banata hai (gpt fail ho to agla reasoning model, phir backup). Bada project ho to pehle main plan, phir har module ka sub-plan."""
     user = ("TASK:\n%s\n\nEXISTING FILES: %s\n\nHARD LIMITS: one writer writes at most %d lines per file. "
             "The user is not technical: choose the simplest stack that runs on a FREE service, secrets only as environment variables." % (
                 (PIPE_ST.get("task") or task)[:4000], existing_block(), PIPE_STEP_LINES))
     sysmsg = PLAN_SYS_PIPE.replace("MAXL", str(PIPE_STEP_LINES)) + (BIG_SPLIT_RULE if PLAN_SPLIT else "") + (PLAN_EXISTING_RULES if project_has_files() else "")
+    if PLAN_SEARCH:
+        user += plan_research(PIPE_ST.get("task") or task)
     def _finish(bp, d, first=None):
         bp, d = expand_modules(user, d, bp, first)
         dz = clip(str((d or {}).get("design") or "").strip(), 2500)
@@ -8408,7 +8785,7 @@ WRITE_SYS = (
     "You write ONE source file of a multi-file project exactly as the PLAN/CONTRACT says. Other files are written by other writers at the same time, so use ONLY the names, "
     "signatures, routes, ids, keys and environment variables that the CONTRACT gives (and the real code/cards of ALREADY WRITTEN files, which are the truth). Use exactly the names the contract gives; "
     "when the contract has no name for something, pick the simplest name and move on, and import only names the contract lists. Write the COMPLETE, working file: no placeholders, no 'rest of the code', no TODO stubs, "
-    "real error handling for empty/invalid input, and handle empty, loading and error states so the result feels finished to a real user. At most MAXL lines. Reply with ONLY the file content inside ONE fenced code block, nothing before or after it.")
+    "real error handling for empty/invalid input, and handle empty, loading and error states so the result feels finished to a real user. Write like a senior engineer: before you finish, walk every function once with a normal input, an empty input and a failing call (None/undefined, missing key, network or file error, wrong type) and fix what would crash; keep logic clear, no dead code, no invented libraries or API calls (use only what the stack really has); UI code must look neat and polished with sensible spacing, labels and feedback. At most MAXL lines. Reply with ONLY the file content inside ONE fenced code block, nothing before or after it.")
 CONT_SYS = (
     "A source file was cut off at the output limit. You get the last lines written so far. Continue EXACTLY with the next line and finish the file. "
     "Do not repeat any line already written. Reply with ONLY the remaining lines inside ONE fenced code block.")
@@ -8563,12 +8940,12 @@ def write_job(f):
 # ---------- bug theek karna (JAAT) ----------
 FIX_SYS = (
     "You fix real bugs in ONE file of a multi-file project. You get the PLAN/CONTRACT, CARDS of other files (their real names), the BUGS and the file with line numbers. "
-    "Fix every listed bug at its real root cause and keep everything else unchanged. Names other files rely on must stay as in the CONTRACT/cards. "
+    "First work out WHY each bug happens: trace the exact line, the values that reach it and who calls it. Fix the cause, not the symptom, and check the same mistake is not repeated elsewhere in this file. If a bug report is only partly right, fix the real problem it points at. After the fix, make sure your change does not break a neighbouring line, import or caller. Keep everything else unchanged. Names other files rely on must stay as in the CONTRACT/cards. "
     "Reply with ONLY edit blocks, one or more, exactly in this format:\n<<<<<<< SEARCH\n<old lines copied EXACTLY from the file, without line numbers>\n=======\n<new lines>\n>>>>>>> REPLACE\n"
     "SEARCH must be unique in the file and match character for character (indent too). No other text.")
 FIX_FULL_SYS = (
     "You fix real bugs in ONE file of a multi-file project. You get the PLAN/CONTRACT, CARDS of other files (their real names), the BUGS and the file with line numbers. "
-    "Fix every listed bug at its real root cause and keep everything else unchanged. Names other files rely on must stay as in the CONTRACT/cards. "
+    "First work out WHY each bug happens: trace the exact line, the values that reach it and who calls it. Fix the cause, not the symptom, and check the same mistake is not repeated elsewhere in this file. If a bug report is only partly right, fix the real problem it points at. After the fix, make sure your change does not break a neighbouring line, import or caller. Keep everything else unchanged. Names other files rely on must stay as in the CONTRACT/cards. "
     "Reply with ONLY the complete corrected file (without line numbers) inside ONE fenced code block.")
 
 
@@ -8645,7 +9022,7 @@ def fix_file(rel, bugs, extra=""):
 CHK_SYS = (
     "You check ONE freshly written file of a multi-file project against the PLAN/CONTRACT. Report ONLY real defects in THIS file: syntax errors, crashes, "
     "a name/signature/route/id/key that differs from the CONTRACT or from the real names in the CARDS of other files, exports the contract promises but the file lacks, "
-    "leftover placeholders/TODO, clear logic errors. Do NOT report style, extras or things that are fine. "
+    "leftover placeholders/TODO, clear logic errors (wrong condition, off-by-one, wrong variable, missing await/return, None/undefined not handled, wrong type, wrong library or API usage, unhandled exceptions on realistic input). Trace the main functions with a normal and an empty input before you answer. Do NOT report style, extras or things that are fine. "
     'Reply with ONLY a JSON array, no prose: [{"file":"path","line":N,"bug":"what is wrong","fix":"exact change"}]. Reply [] if no real defect. Max 5 items.')
 CONF_SYS = (
     "You verify ONE reported bug in a source file. Decide whether the bug is STILL PRESENT in the code shown. Be strict and literal: read the exact lines. "
@@ -8882,7 +9259,7 @@ FINAL_SYS_PIPE = (
     "You are the final reviewer of a finished multi-file project. You get the TASK, the PLAN/CONTRACT, a MEMORY MAP and ALL source files with line numbers. "
     "Read everything like a developer doing a last test run in his head: follow the real flow from start-up through each feature, and check that the setup/run "
     "commands would work with these files. Report ONLY real defects: syntax errors, crashes, wrong imports/names/signatures/routes/ids between files, missing files "
-    "or dependencies (requirements/package files), config that makes it fail to start or deploy, logic that clearly does not do what the TASK asks, and a SPEC line (WHEN ... THEN ...) that the code clearly does not satisfy. "
+    "or dependencies (requirements/package files), config that makes it fail to start or deploy, logic that clearly does not do what the TASK asks, a SPEC line (WHEN ... THEN ...) that the code clearly does not satisfy, a user flow that dead-ends or cannot be completed, data that is saved but never read back (or the reverse), and a real security hole (secret written in code, unsanitised input reaching a shell/SQL/HTML). Actually trace each SPEC line and the main user journey through the code step by step instead of skimming. "
     "Do NOT report style, suggestions, extra features, hardening, or a difference between a name written in the notes/task and the real file or folder name. "
     "Do not repeat something listed under ALREADY REPORTED unless it is STILL really present in the code below. Give the exact line from the numbered listing. "
     'Reply with ONLY a JSON array, no prose, no code fence: [{"file":"path","line":N,"bug":"what is wrong","fix":"exact change"}]. '
@@ -8910,11 +9287,12 @@ def final_payload(nm, rnd):
     """DSX ke liye: task + contract + memory map + (pichhle round ke bug) + files. Jagah kam ho to badli nahi files sirf card ke roop me."""
     bp = PIPE_ST["bp"]
     budget = min(DSX_FINAL_CHARS, ctx_limit(nm, APIS[nm]) - 16000)          # DSX ho ya Gemini: provider ka asli (seekha hua) context bhi dekho
-    budget = max(30000, budget)
+    budget = max(8000, budget)                                   # pehle ka 30000 ka floor chhote context wale model ko overflow karata tha
     seen = PIPE_ST.setdefault("reviewed", {})
     head = ["TASK:\n" + (PIPE_ST.get("task") or "")[:3000], "PLAN / CONTRACT:\nProject: %s | Stack: %s | Niyam: %s\n%s" % (
         bp["summary"], bp["stack"], bp["notes"] or "-", contract_text(bp, 24000)),
         "COMMANDS: " + " || ".join("%s: %s" % (k, " ; ".join(v)) for k, v in bp["commands"].items() if v)]
+    head.append("EVIDENCE LEDGER (real events recorded by code): " + ledger_text(("search",)) + ". Source inspection is not a test run; do not claim a feature works from reading code alone.")
     mem = memory_text(6000)
     if mem:
         head.append("MEMORY MAP (har file ka card; mismatch isse bhi milao):\n" + mem)
@@ -9119,16 +9497,42 @@ TEST_ENV_RE = re.compile(r"ModuleNotFoundError|No module named|Cannot find modul
 
 
 def run_tests():
-    """bp ke 'test' commands (sirf asli check wale) chalata hai. ([(cmd, out)] fail, skipped_env_note)."""
+    """bp ke 'test' commands chalata hai. ([(cmd, out)] fail, env_skip). Poori status PIPE_ST['test_status'] me:
+    PASS / FAIL / SKIPPED_ENV / BLOCKED_BY_POLICY / NOT_RUN / CANCELLED ka ginti."""
     bp, bad, env_skip = PIPE_ST["bp"], [], []
-    for c in [x for x in bp["commands"].get("test", []) if VERIFY_CMD_RE.search(x)][:5]:
+    st = {"PASS": 0, "FAIL": 0, "SKIPPED_ENV": 0, "BLOCKED_BY_POLICY": 0, "NOT_RUN": 0, "CANCELLED": 0}
+    cmds = [x for x in bp["commands"].get("test", []) if VERIFY_CMD_RE.search(x)]
+    st["NOT_RUN"] = max(0, len(cmds) - 5)
+    for c in cmds[:5]:
         if STATE["cancel"]:
-            break
+            st["CANCELLED"] += 1
+            continue
         code, out = quick_run(c, 100)
+        blocked = code == 126 and out.startswith("roka gaya (")
         ev("step", kind="RUN", arg=c[:120], out=clip(out, 1500) or "(saaf)", ok=(code == 0), prov="mumbai")
-        if code != 0:
-            (env_skip if TEST_ENV_RE.search(out) or code in (126, 127) else bad).append((c, out))
+        if code == 0:
+            st["PASS"] += 1
+        elif blocked:
+            st["BLOCKED_BY_POLICY"] += 1
+            PIPE_ST.setdefault("warn", []).append("test policy ne roka (fail nahi, par chala bhi nahi): " + c[:60])
+        elif TEST_ENV_RE.search(out) or code in (126, 127):
+            st["SKIPPED_ENV"] += 1
+            env_skip.append((c, out))
+        else:
+            st["FAIL"] += 1
+            bad.append((c, out))
+    PIPE_ST["test_status"] = st
     return bad, env_skip
+
+
+def test_verdict():
+    """PASSED sirf tab jab koi required test sach me chala aur pass hua, aur kuch fail/blocked/skipped nahi. Warna UNVERIFIED / FAILED."""
+    st = PIPE_ST.get("test_status") or {}
+    if st.get("FAIL"):
+        return "FAILED"
+    if st.get("PASS") and not (st.get("BLOCKED_BY_POLICY") or st.get("SKIPPED_ENV") or st.get("CANCELLED")):
+        return "PASSED"
+    return "UNVERIFIED"
 
 
 def final_phase():
@@ -9157,7 +9561,11 @@ def final_phase():
             if env_skip:
                 ev("note", text="ℹ test chhoda (is server me library/tool nahi): " + "; ".join(c[:50] for c, _ in env_skip))
             if not tests_fail:
-                show_review("Aakhri jaanch (%s) round %d" % (who, rnd), True, "koi asli bug nahi mila" + (" · test pass" if bp["commands"].get("test") and not env_skip else ""), who)
+                verdict = test_verdict()
+                PIPE_ST["verdict"] = verdict
+                show_review("Aakhri jaanch (%s) round %d" % (who, rnd), True, "reviewer ko koi asli bug nahi mila (padh kar) · test: %s" % verdict, who)
+                if verdict != "PASSED":
+                    PIPE_ST.setdefault("warn", []).append("UNVERIFIED: koi test chala-ke pass nahi hua (%s). Ye sirf code padh kar 'bug nahi mila' hai, 'chal gaya' ka saboot nahi." % ", ".join("%s=%d" % kv for kv in (PIPE_ST.get("test_status") or {}).items() if kv[1]) or "koi test declare/chala nahi")
                 PIPE_ST["clean"] = True
                 break
             for c, o in tests_fail:                               # test fail = bug; file error se milti ho to
@@ -9588,18 +9996,6 @@ def pre_route(task):
 
 
 # ---------- 10) agent se jodna ----------
-def pipe_hosting_web(bp):
-    """Ek web search: abhi ke FREE hosting options (Gemini ko setup samjhane me kaam aaye). '' = nahi mila."""
-    try:
-        q = "best free hosting for %s project %s" % (clip(bp.get("stack") or "", 40), time.strftime("%Y"))
-        txt, _c, ok, _x = do_search(q)
-        if ok and txt and not str(txt).startswith(("ERROR", "⏹")):
-            return clip(re.sub(r"\n\(kisi link.*$", "", txt, flags=re.S), 2200)
-    except Exception as e:
-        log("hosting search galti: %s" % e)
-    return ""
-
-
 def pipe_conclude(task, fresh=True):
     """Pipeline ke baad chat me saar + zip. True = kaam nipta (purana agent loop nahi chalana)."""
     if STATE["cancel"]:
@@ -9733,14 +10129,19 @@ def ask_user(question, options=None, ctx=""):
 
 
 # ---------- A) baat / sawal: JAAT nahi ----------
-NET_NOTE = ("Tumhare paas apna internet / web-search hai (jaise DeepSeek, Gemini ya DeepAI ke app me hota hai): taaza cheez ho (naya version, latest news, kaun kya hai abhi) "
-            "to purani yaad se mat bolo, khud internet par dekh ke bolo.")
-NET_NOTE_EN = ("You have your own internet / web search (like the DeepSeek, Gemini or DeepAI web apps). Before you answer or plan, look up anything that may have changed "
-               "(latest library/framework versions, current free hosting limits, new APIs, recent news) and use the newest approach that really works today.")
-CHAT_SYS = ("Tum Mumbai ho, user ke phone ka dost jaisa sahayak. Hinglish me chhota (1-4 line), seedha aur sach jawab do. Pyaar aur aaram se baat karo. Kisi file/tool ya @@command ki baat mat karo; "
-            "jo pata nahi wo bol do ki pata nahi. " + NET_NOTE)
-STUDY_SYS = ("Tum Mumbai ho, padhai ka dost. JALDI aur saaf aasaan Hinglish me jawab do: pehle seedha jawab, phir zaroorat ho to chhote steps/points (formula, example). "
-             "Aaram aur pyaar se baat karo, bhari bhaarkam shabd nahi. Agar neeche 'INTERNET SE TAAZA JAANKARI' di ho to jawab usi se do. Jo pata nahi wo bol do. "
+NET_NOTE = ("Jo cheez badalti nahi (math, science, concepts, code ka logic) usse poore bharose se seedha jawab do, hichkichao mat. "
+            "Sirf taaza/badalne wali baat (naya version, news, abhi kaun kya hai, price, free limit) ke liye: agar neeche 'INTERNET SE TAAZA JAANKARI' ya 'SEARCH EVIDENCE' ka asli block hai to usi se bolo; "
+            "wo na ho to ek line me bolo 'ye live check nahi kiya', phir apna best jawab do. Kabhi mat kaho ki tumne internet par dekha agar block nahi diya.")
+NET_NOTE_EN = ("LIVE LOOKUP: you have no browsing tool in this call. For stable knowledge (concepts, math, code logic) answer with full confidence. For things that change (versions, prices, news, free limits): "
+               "use a 'SEARCH EVIDENCE' / 'INTERNET SE TAAZA JAANKARI' block if one is shown (snippets are leads, not proof); otherwise give your best answer and mark it 'not live-verified' once. "
+               "Never claim you searched, opened, tested or verified something unless that evidence is shown to you.")
+CHAT_SYS = ("Tum Mumbai ho, user ke phone ka dost aur tez dimaag wala sahayak. Hinglish me, pyaar se. Aasaan sawal ka jawab seedha aur chhota (1-4 line). "
+            "Mushkil ya soch wale sawal me pehle andar hi andar poora sochkar: asli sawal kya hai, kaunse options/tareeke hain, kaun sa sabse sahi aur kyun; phir pehle seedha jawab, uske baad wajah aur zaroori steps. "
+            "Faisla lo aur ek pakka raasta batao, 'ye bhi ho sakta hai wo bhi' ki bheed mat lagao. User galat ya ulta soch raha ho to saaf aur pyaar se bata do. Kisi file/tool ya @@command ki baat mat karo; "
+            "jo sach me nahi pata wo bol do, par jo pata hai wo poore bharose se bolo. " + NET_NOTE)
+STUDY_SYS = ("Tum Mumbai ho, padhai ka sabse achha dost aur teacher. Saaf aasaan Hinglish me: pehle seedha jawab, phir kaise nikla (steps, formula, ek chhota example). "
+             "Numerical/logic me har step likho aur aakhir me jawab ko ek baar ulta check karo (units, calculation, ya answer wapas daal ke). Concept me pehle simple idea, phir detail, phir exam me kaise poochha jata hai. "
+             "Galat concept ho to wajah ke saath theek karo. Bhari bhaarkam shabd nahi. Agar neeche 'INTERNET SE TAAZA JAANKARI' di ho to taaza baat usi se do. "
              "Kisi file/tool/@@command ki baat mat karo. " + NET_NOTE)
 NOW_RE = re.compile(r"abhi|latest|naya\b|nayi\b|naye\b|\bnew\b|today|\baaj\b|current|recent|news|khabar|price|\brate\b|score|2025|2026|bnna|banna|kaun\s+hai|who\s+is\s+the|"
                     r"\bcm\b|chief minister|prime minister|\bpm\b|president|kitne\s+(?:state|district|rajya)", re.I)
@@ -9837,13 +10238,11 @@ def chat_reply(task, study=False):
         extra += "\n\n" + read_images(imgs)
     if study and NOW_RE.search(task):                       # taaza baat (abhi/latest/naya): pehle internet, purani yaad se nahi
         try:
-            txt, _c, ok, _x = do_search(clip(task, 160))
-            if ok and txt and not str(txt).startswith(("ERROR", "⏹")):
-                extra = "\n\nINTERNET SE TAAZA JAANKARI:\n" + clip(re.sub(r"\n\(kisi link.*$", "", str(txt), flags=re.S), 2500)
+            extra += search_evidence(re.sub(r"\[User ke jawab.*$", "", task, flags=re.S).strip()[:160], 2500, "INTERNET SE TAAZA JAANKARI")
         except Exception as e:
             log("study search galti: %s" % e)
     user = (("Pichhli baat:\n" + hist + "\n\n") if hist else "") + "User: " + task + extra
-    txt, nm = small_gen(STUDY_SYS if study else CHAT_SYS, user, 1500 if study else 700, STUDY_PREF if study else CHAT_PREF)
+    txt, nm = small_gen(STUDY_SYS if study else CHAT_SYS, user, 1800 if study else 1200, STUDY_PREF if study else CHAT_PREF)
     txt = "\n".join(l for l in txt.split("\n") if not l.strip().startswith("@@")).strip()
     if not txt:
         return False
@@ -9879,16 +10278,16 @@ ANDROID_ANS_RE = re.compile(r"android|apk", re.I)
 ASK_DONE_RE = re.compile(r"\[User ke jawab:")
 NAME_STOP = set("eak ek one the and for with app apps application banao bnao banado banana bana bna banaiye banvao make create build develop design mere meri mera "
                 "muja mujhe jo jisme jisse hai ho tha chahiye cheya chahie phone mobile android apk ka ki ke me mein ko se aur ya type new naya nayi simple basic".split())
-PLAN_SYS_PIPE = PLAN_SYS_PIPE + " 9) " + NET_NOTE_EN + " Pick the newest stable, free, working choice and put the exact setup/deploy commands that work today in commands."
+PLAN_SYS_PIPE = PLAN_SYS_PIPE + " 9) " + NET_NOTE_EN + " Pick the latest COMPATIBLE stable, free choice (compatible with the framework/SDK and existing project files, not merely the newest number); if the evidence does not confirm a version or a free limit, keep a conservative known choice and say 'unverified' in notes."
 EXPLAIN_SYS = EXPLAIN_SYS + " " + NET_NOTE
-FINAL_SYS_PIPE = FINAL_SYS_PIPE + " If you are unsure whether an API, library call or version exists today, check it on your own internet before you call it a defect."
+FINAL_SYS_PIPE = FINAL_SYS_PIPE + " You cannot browse. If you are unsure whether an API, library call or version exists today, do NOT report it as a defect unless the code itself or the test output proves it is wrong."
 ANDROID_RULES = (
     "\n[ANDROID RULES: Ye ANDROID app hai (phone par install hoga), browser/web app NAHI. Android template ban chuka hai (gradle, AndroidManifest.xml, theme, icon, "
     ".github/workflows/android.yml): unhe dobara mat likho, sirf zaroorat par badlo (jaise AndroidManifest me permission/activity). Stack = Kotlin + XML layouts + AndroidX + "
     "RecyclerView (template ki dependencies; extra library chahiye to app/build.gradle.kts me add karo). App ki files: MainActivity.kt (template wali file badlo), naye .kt classes, "
     "res/layout/*.xml, res/values/strings.xml. Har R.id / R.layout / R.string jo Kotlin me aaye wo res/ me maujood ho: sab ids notes me fix karo. Permissions (media/storage jaisi) "
     "manifest me likho aur runtime par bhi maango (Android 13+ aur purane dono). APK GitHub Actions banata hai (artifact 'app-debug-apk'): commands.deploy = 'git push' phir Actions tab se APK; "
-    "commands.test me sirf offline check, na ho to khaali. Plan me koi .png/.apk binary file mat daalo. Template ke Gradle/AGP/Kotlin/compileSdk versions purane ho sakte hain: apne internet se latest STABLE aur ek-dusre ke saath compatible versions dekho; "
+    "commands.test me sirf offline check, na ho to khaali. Plan me koi .png/.apk binary file mat daalo. Template ke Gradle/AGP/Kotlin/compileSdk versions purane ho sakte hain: SEARCH EVIDENCE me latest STABLE aur ek-dusre ke saath compatible versions saaf dikhen; "
     "pakka ho tabhi settings/build.gradle.kts aur workflow ke gradle-version me badlo, warna template ke versions rehne do.]")
 
 
@@ -9899,7 +10298,7 @@ def app_name_for(task):
     return " ".join(w.capitalize() for w in ws[:3]) or "My App"
 
 
-ASK_MAX = max(1, min(10, int(_env("ASK_MAX", "10") or 10)))         # Gemini max kitne sawal poochh sakta hai (1-10)
+ASK_MAX = max(1, min(10, int(_env("ASK_MAX", "3") or 3)))         # Gemini max kitne sawal poochh sakta hai (1-10)
 QGEN_SYS = (
     "You are the intake helper of a NON-TECHNICAL user who wants software built by an AI team. The message may be Hinglish with spelling mistakes. "
     "Your job: make sure the team knows WHAT to build before planning starts, asking as little as possible.\n"
